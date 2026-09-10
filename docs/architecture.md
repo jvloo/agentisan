@@ -1,6 +1,6 @@
 # Architecture (proposed)
 
-This document describes Agentisan's intended runtime. **Milestone 1 implements only the simulated-agent registry and CLI/MCP inspection**, described in the [current contract](milestone-1.md). Execution, messaging, budgets, approvals, native bindings, and deep links below remain proposed. Rust is selected for the core ([decision](decisions/0001-rust-core.md)); the durable-execution engine remains undecided, pending evaluation of existing components.
+This document describes Agentisan's broader runtime design. The Rust implementation now includes the fixture registry and managed native CLI teams with persistent MCP messages, bounded invocations, and native session continuation. See the [live-team contract](live-teams.md) for what is implemented and its limits. Human approvals, general effect reconciliation, direct API adapters, and native deep-link opening remain proposed. Rust is selected for the core ([decision](decisions/0001-rust-core.md)); a general durable-execution engine remains undecided.
 
 ## Goals and non-goals
 
@@ -13,7 +13,7 @@ Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive
 - **Groups** are organizational/policy namespaces. They do not spawn automatic coordinating agents.
 - **Teams** live inside groups; **agents** live inside teams.
 - Exactly **one main agent owns coordination** for a given objective/job at any time. Ownership transfer is explicit and stale owners are rejected — the system must never let two main agents drive the same objective concurrently.
-- The initial experience is **client-led**: the human's client hosts the main agent. Accepted, service-owned workers can keep making progress while the client is disconnected, but the client-owned main agent must reconnect to continue coordinating. A future service-hosted coordinator could continue independently while its host is available — this is a later milestone, not part of the initial design.
+- The implemented CLI-team path is **service-led**: the service hosts the lead's native CLI turns and resumes members when messages arrive. Coordination continues while the service host is available. A natively bound **client-led** adapter remains planned; in that mode, a disconnected client-owned main agent would need to return for coordination. The two modes must never create competing owners of the same objective.
 
 ## What the service owns
 

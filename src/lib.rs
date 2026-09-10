@@ -1,6 +1,10 @@
+pub mod capture;
+pub mod cli_protocol;
 pub mod client;
 pub mod fixture;
 pub mod mcp;
 pub mod model;
 pub mod registry;
 pub mod server;
+pub mod teams;
+pub mod worker;

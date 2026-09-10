@@ -102,4 +102,6 @@ pub enum Query {
     TeamsList { group_id: GroupId },
     AgentsList { team_id: TeamId },
     AgentsInspect { agent_id: AgentId },
+    RunsInspect { run_id: String },
+    MessagesList { run_id: String },
 }

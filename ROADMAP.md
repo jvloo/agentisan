@@ -1,6 +1,6 @@
 # Roadmap
 
-Milestones 0 and 1 are implemented. Later milestones remain proposed. See [docs/architecture.md](docs/architecture.md) for the intended runtime, [docs/milestone-1.md](docs/milestone-1.md) for the current implementation boundary, and [README.md](README.md) for runnable commands.
+Milestones 0 and 1 are implemented. Real CLI team execution and messaging now cover parts of later milestones, as marked below. See [docs/architecture.md](docs/architecture.md) for the broader design and [docs/live-teams.md](docs/live-teams.md) for current behavior and limits.
 
 ## Milestone 0 — Design bootstrap
 
@@ -24,6 +24,8 @@ Acceptance:
 
 ## Milestone 2 — Durable single worker and trusted human decisions
 
+**Status: partial.** Native CLI turns, completion receipts, process deadlines/watchdog, interrupted-state recording, and narrow inspected resume are implemented. General effect reconciliation and trusted human decisions remain open.
+
 Goal: one bounded worker job can complete, recover, or report uncertain effects after a crash, and a human decision can gate it.
 
 Acceptance:
@@ -32,6 +34,8 @@ Acceptance:
 - Tests demonstrate duplicate request deduplication, lost-ack/reconnect recovery with an idempotent test executor, preservation of uncertain side effects, stale-owner rejection, rejection of stale approval after a material change, and human rejection blocking only dependent work. Fake-executor tests do not establish exactly-once external effects.
 
 ## Milestone 3 — Real providers with verified containment and accounting
+
+**Status: partial.** Claude and Codex account-backed CLI adapters run with scoped MCP tools, no shell/edit tools, and reported usage. Direct API adapters, a general code executor, full usage coverage, and token/cost budget reservations remain open.
 
 Goal: connect at least two real model providers as workers, with enforced budgets and isolated execution.
 
@@ -44,6 +48,8 @@ Acceptance:
 
 ## Milestone 4 — 1-to-N peer collaboration and existing-client links
 
+**Status: core communication implemented.** Reusable service-owned teams perform real lead/worker and worker/worker MCP exchanges in both provider directions. CLI/MCP inspection and exact native IDs work. Client-owned lead binding, native deep-link opening, and concurrent native turns remain open.
+
 Goal: a main agent driven from an existing CLI/Desktop client can delegate to multiple workers that exchange bounded peer messages, with native links back into supported clients.
 
 Acceptance:
@@ -53,9 +59,11 @@ Acceptance:
 
 ## Milestone 5 — Multi-team policy and service-owned coordinator (later)
 
+**Status: partial.** The managed CLI scheduler already owns coordinator turns. Cross-team policies beyond current group grants, advanced ownership transfer, and dynamic delegation remain open.
+
 Goal: support policy scoped across multiple teams in a group, and an optional service-hosted coordinator that can continue independently while its host is available.
 
 Acceptance:
 - Group-level policy (e.g., budget or permission limits) is enforced consistently across more than one team without requiring an always-connected client.
 - A service-owned coordinator can resume driving an objective after the originating client disconnects, under explicit ownership transfer, with stale-owner rejection still enforced.
-- This milestone remains exploratory until Milestones 1–4 are complete; its scope may change based on findings from earlier milestones.
+- Remaining scope stays exploratory and must be justified by findings from the implemented paths.
