@@ -138,9 +138,25 @@ enum AgentsCommand {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
+    // The process-group anchor only uses std process/thread APIs. Avoid creating
+    // a Tokio worker pool for every supervised CLI invocation.
+    if let Command::WorkerHost {
+        exit_file,
+        timeout_ms,
+        command,
+    } = &cli.command
+    {
+        return agentisan::worker::host(exit_file, *timeout_ms, command);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(cli))
+}
+
+async fn run(cli: Cli) -> Result<()> {
     let query = match cli.command {
         Command::WorkerHost {
             exit_file,
@@ -180,6 +196,11 @@ async fn main() -> Result<()> {
                 anyhow::anyhow!("another Agentisan service owns this data directory")
             })?;
             let registry = Registry::open(&path).await?;
+            if !registry.is_initialized().await? {
+                bail!(
+                    "registry initialization is incomplete; import a valid fixture or create a managed team"
+                );
+            }
             let listener = tokio::net::TcpListener::bind(listen).await?;
             // A single machine-readable readiness line; no credentials or records.
             println!(

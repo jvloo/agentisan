@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod cli_protocol;
 pub mod client;
 pub mod fixture;

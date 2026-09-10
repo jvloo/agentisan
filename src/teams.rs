@@ -185,6 +185,7 @@ pub async fn create(registry: &Registry, data_dir: &Path, config: &TeamConfig) -
             sqlx::query("INSERT INTO grants(principal_id,group_id) VALUES(?,?)").bind(p.id.as_str()).bind(config.group.id.as_str()).execute(&mut *tx).await?;
             sqlx::query("INSERT INTO team_members(agent_id,config,credential_file) VALUES(?,?,?)").bind(a.id.as_str()).bind(serde_json::to_string(a)?).bind(path.to_string_lossy().as_ref()).execute(&mut *tx).await?;
         }
+        sqlx::query("INSERT OR IGNORE INTO registry_meta(key,value) VALUES('initialized','1')").execute(&mut *tx).await?;
         tx.commit().await?;
         Ok::<_,anyhow::Error>(json!({"team_id":config.team.id,"agents":config.agents.iter().map(|a|&a.id).collect::<Vec<_>>(),"credential_directory":root}))
     }.await;

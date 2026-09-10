@@ -68,7 +68,7 @@ impl Registry {
             0 => {
                 sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
             }
-            1 | 2 => {}
+            1..=3 => {}
             _ => {
                 return Err(RegistryError::Invalid(
                     "unsupported database schema version".into(),
@@ -80,12 +80,24 @@ impl Registry {
                 .execute(&mut *tx)
                 .await?;
         }
+        if version < 3 {
+            sqlx::raw_sql("CREATE TABLE IF NOT EXISTS registry_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO registry_meta(key,value) SELECT 'initialized','1' WHERE EXISTS(SELECT 1 FROM groups); PRAGMA user_version=3;").execute(&mut *tx).await?;
+        }
         tx.commit().await?;
         Ok(Self { pool })
     }
 
     pub async fn close(&self) {
         self.pool.close().await;
+    }
+
+    pub async fn is_initialized(&self) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM registry_meta WHERE key='initialized' AND value='1'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count == 1)
     }
 
     pub async fn register_fixture(
@@ -175,6 +187,9 @@ impl Registry {
                 }
             }
         }
+        sqlx::query("INSERT OR IGNORE INTO registry_meta(key,value) VALUES('initialized','1')")
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }

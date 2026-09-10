@@ -113,9 +113,43 @@ mod unix {
         process::Stdio,
         time::{Duration, Instant},
     };
-    use tokio::{io::AsyncWriteExt, process::Command};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        process::Command,
+    };
 
     struct ProcessGroup(Option<i32>);
+    struct CaptureTask(Option<tokio::task::JoinHandle<std::io::Result<()>>>);
+    impl Drop for CaptureTask {
+        fn drop(&mut self) {
+            if let Some(task) = self.0.take() {
+                task.abort();
+            }
+        }
+    }
+    impl CaptureTask {
+        fn finished(&self) -> bool {
+            self.0.as_ref().is_some_and(|t| t.is_finished())
+        }
+        async fn finish(&mut self) -> Result<()> {
+            if let Some(task) = self.0.as_mut() {
+                let result = tokio::time::timeout(Duration::from_secs(1), task).await;
+                match result {
+                    Ok(joined) => {
+                        self.0.take();
+                        joined.context("output capture task failed")??;
+                    }
+                    Err(_) => {
+                        if let Some(task) = self.0.take() {
+                            task.abort();
+                        }
+                        bail!("output capture did not finish within cleanup grace");
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
     impl ProcessGroup {
         fn kill(&mut self) {
             if let Some(pid) = self.0.take() {
@@ -155,22 +189,59 @@ mod unix {
         work: &Work,
         cwd: &Path,
         args: &[&str],
+        turn_deadline: Instant,
     ) -> Result<std::process::Output> {
         let mut command = Command::new(&work.agent.executable);
-        command.args(args).current_dir(cwd).kill_on_drop(true);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing preflight stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing preflight stderr"))?;
         let result = tokio::time::timeout(
-            Duration::from_secs(seconds_left(work)?.min(15)),
-            command.output(),
+            Duration::from_secs(seconds_left(work)?.min(15))
+                .min(turn_deadline.saturating_duration_since(Instant::now())),
+            async {
+                let out = async {
+                    let mut bytes = Vec::new();
+                    stdout.take(65_537).read_to_end(&mut bytes).await?;
+                    Ok::<_, std::io::Error>(bytes)
+                };
+                let err = async {
+                    let mut bytes = Vec::new();
+                    stderr.take(65_537).read_to_end(&mut bytes).await?;
+                    Ok::<_, std::io::Error>(bytes)
+                };
+                let (status, stdout, stderr) = tokio::try_join!(child.wait(), out, err)?;
+                Ok::<_, std::io::Error>(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                })
+            },
         )
         .await
         .context("CLI preflight timed out")??;
+        if result.stdout.len() > 65_536 || result.stderr.len() > 65_536 {
+            bail!("CLI preflight output limit exceeded");
+        }
         if !result.status.success() {
             bail!("CLI preflight failed; inspect local authentication or version compatibility");
         }
         Ok(result)
     }
 
-    async fn preflight(work: &Work, cwd: &Path) -> Result<String> {
+    async fn preflight(work: &Work, cwd: &Path, turn_deadline: Instant) -> Result<String> {
         let forbidden: &[&str] = match work.agent.provider {
             Provider::Claude => &[
                 "ANTHROPIC_API_KEY",
@@ -189,11 +260,11 @@ mod unix {
                 "this adapter requires the normal account route; provider environment override detected"
             );
         }
-        let version = preflight_call(work, cwd, &["--version"]).await?;
+        let version = preflight_call(work, cwd, &["--version"], turn_deadline).await?;
         let version = String::from_utf8(version.stdout)?.trim().to_owned();
         match work.agent.provider {
             Provider::Claude => {
-                let output = preflight_call(work, cwd, &["auth", "status"]).await?;
+                let output = preflight_call(work, cwd, &["auth", "status"], turn_deadline).await?;
                 let status: Value =
                     serde_json::from_slice(&output.stdout).context("invalid Claude auth status")?;
                 if status["loggedIn"] != true
@@ -204,7 +275,7 @@ mod unix {
                 }
             }
             Provider::Codex => {
-                let output = preflight_call(work, cwd, &["login", "status"]).await?;
+                let output = preflight_call(work, cwd, &["login", "status"], turn_deadline).await?;
                 if ![
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr),
@@ -243,6 +314,7 @@ mod unix {
         host_executable: &Path,
     ) -> Result<TurnResult> {
         let started = Instant::now();
+        let turn_deadline = started + Duration::from_secs(work.turn_timeout);
         let workspace = data_dir
             .join("runs")
             .join(&work.run_id)
@@ -256,7 +328,7 @@ mod unix {
         let stdout_file = file(&stdout_path)?;
         let stderr_file = file(&stderr_path)?;
         let outcome=async {
-            let version=preflight(&work,&workspace).await?;
+            let version=preflight(&work,&workspace,turn_deadline).await?;
             store(&artifacts.join("preflight.json"),&json!({"version":version,"auth":"usable_account_status","provider":work.agent.provider.as_str(),"remote_entitlement":"checked_by_first_authorized_turn"}))?;
             let exe=host_executable.to_path_buf();
             let mcp_args=vec!["--endpoint".into(),endpoint.into(),"--credential-file".into(),work.credential_file.to_string_lossy().into_owned(),"mcp".into()];
@@ -273,24 +345,35 @@ mod unix {
             } else {
                 format!("New work is available for your Agentisan session. Run ID: {}. Call messages_receive once, act on the new messages, and send any needed replies. END YOUR TURN when available work is sent; do not poll or wait for peers. Only the lead may call runs_complete. A pending-message completion error means yield this turn.",work.run_id)
             };
-            let limit=Duration::from_secs(work.turn_timeout).checked_sub(started.elapsed()).ok_or_else(||anyhow::anyhow!("turn deadline reached during preflight"))?.min(Duration::from_secs(seconds_left(&work)?));
+            let limit=turn_deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(seconds_left(&work)?));
+            if limit.is_zero() {bail!("turn deadline reached during preflight");}
             let deadline=Instant::now()+limit;
             let exit_file=artifacts.join("native-exit.json");
             let mut command=Command::new(host_executable);
-            command.arg("worker-host").arg("--exit-file").arg(&exit_file).arg("--timeout-ms").arg(limit.as_millis().max(1).to_string()).arg("--").arg(&work.agent.executable).args(args).current_dir(&workspace).stdin(Stdio::piped()).stdout(Stdio::from(stdout_file)).stderr(Stdio::from(stderr_file)).kill_on_drop(true);
+            command.arg("worker-host").arg("--exit-file").arg(&exit_file).arg("--timeout-ms").arg(limit.as_millis().max(1).to_string()).arg("--").arg(&work.agent.executable).args(args).current_dir(&workspace).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
             command.as_std_mut().process_group(0);
             let mut child=command.spawn().context("cannot spawn configured CLI")?;
             let pid=child.id().ok_or_else(||anyhow::anyhow!("missing process ID"))? as i32;
             let mut group=ProcessGroup(Some(pid));
+            let capture_state=std::sync::Arc::new(crate::capture::CaptureState::new(8_388_608));
+            let mut capture=CaptureTask(Some(tokio::spawn(crate::capture::capture(
+                child.stdout.take().ok_or_else(||anyhow::anyhow!("missing worker stdout"))?,
+                child.stderr.take().ok_or_else(||anyhow::anyhow!("missing worker stderr"))?,
+                tokio::fs::File::from_std(stdout_file),tokio::fs::File::from_std(stderr_file),capture_state.clone()))));
             let mut input=child.stdin.take().ok_or_else(||anyhow::anyhow!("missing CLI stdin"))?;
             tokio::time::timeout(deadline.saturating_duration_since(Instant::now()),async {
                 input.write_all(prompt.as_bytes()).await?;
                 input.shutdown().await
-            }).await.context("CLI stdin transfer timed out; owned process group stopped")??;
+            }).await.context("CLI stdin transfer timed out; owned process group stopped")?.context("CLI stdin transfer failed; owned process group stopped")?;
             drop(input);
             let mut observed:Option<String>=None;
             let exit=loop {
-                if fs::metadata(&stdout_path)?.len()+fs::metadata(&stderr_path)?.len()>8_388_608 {bail!("CLI output limit exceeded; partial logs retained");}
+                if capture_state.truncated() {
+                    let _=capture.finish().await;
+                    store(&artifacts.join("output-truncated.json"),&json!({"limit":8_388_608,"written":capture_state.written()}))?;
+                    bail!("CLI output limit exceeded; bounded partial logs retained");
+                }
+                if capture.finished(){capture.finish().await?;}
                 if observed.is_none() {
                     let partial=fs::read_to_string(&stdout_path).unwrap_or_default();
                     if let Some(id)=cli_protocol::initial_native_id(&work.agent.provider,&partial) {
@@ -315,6 +398,11 @@ mod unix {
             tokio::time::sleep(Duration::from_millis(200)).await;
             group.kill();
             let _=tokio::time::timeout(Duration::from_secs(1),child.wait()).await;
+            capture.finish().await?;
+            if capture_state.truncated() {
+                store(&artifacts.join("output-truncated.json"),&json!({"limit":8_388_608,"written":capture_state.written()}))?;
+                bail!("CLI output limit exceeded; bounded partial logs retained");
+            }
             if exit["success"]!=true {bail!("CLI exited unsuccessfully; inspect private stderr artifact");}
             let stdout=fs::read_to_string(&stdout_path)?;
             let parsed=cli_protocol::parse(&work.agent.provider,&stdout,expected)?;

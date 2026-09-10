@@ -103,6 +103,12 @@ size, and the run deadline. A native CLI invocation may contain multiple model/t
 stopping threshold. Codex has no universal per-task dollar cap. Missing usage remains unknown,
 and provider-side work or charges may continue after local cancellation.
 
+Preflight, stdin transfer, and execution consume one monotonic turn deadline. Each preflight
+stream is bounded to 64 KiB. Native stdout/stderr are piped through a shared capture task that
+writes at most 8 MiB combined, with a separate truncation marker; oversized output never
+reaches the raw log files beyond that cap. Field limits remain distinct from transport limits:
+the HTTP envelope allows JSON escaping around a valid 16 KiB completion result.
+
 A private process-group anchor retains process identity through cleanup, with a watchdog
 that bounds the group even if the service dies. The service does not reap the anchor before
 group cleanup. Stdin transfer and execution share the turn deadline. Detached provider modes
@@ -122,6 +128,12 @@ rejects exhausted deadlines, failed/unknown turns, and runs without unread messa
 reconciliation of interrupted model/tool work and durable human decisions remain future work.
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
+
+Database schema version 3 records initialization readiness in the same transaction as a
+successful fixture import or team creation. Failed first-time initialization may leave a
+schema file, but the service will not treat it as ready. Existing databases with records are
+migrated; an old empty database without readiness evidence needs an explicit valid import or
+team creation. No failed import deletes an existing database.
 
 ## Repeat the live acceptance test
 

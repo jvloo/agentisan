@@ -187,3 +187,43 @@ async fn case_distinct_principals_remain_distinct_and_legacy_files_migrate() {
     assert!(legacy.is_file());
     assert_eq!(read_credential(&migrated[0]).unwrap(), token);
 }
+
+#[tokio::test]
+async fn failed_first_import_does_not_make_the_service_ready() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    agentisan::fixture::private_dir(&data).unwrap();
+    agentisan::fixture::private_dir(&data.join("credentials")).unwrap();
+    let bad = data.join("credentials/support_reader.token");
+    std::fs::write(&bad, "invalid credential").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/registry.json");
+    assert!(initialize(&data, &fixture).await.is_err());
+    assert!(!data.join("credentials/inventory_reader.token").exists());
+    let registry = Registry::open(&data.join("registry.sqlite3"))
+        .await
+        .unwrap();
+    assert!(!registry.is_initialized().await.unwrap());
+    registry.close().await;
+    let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentisan"))
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    std::fs::remove_file(bad).unwrap();
+    initialize(&data, &fixture).await.unwrap();
+    let registry = Registry::open(&data.join("registry.sqlite3"))
+        .await
+        .unwrap();
+    assert!(registry.is_initialized().await.unwrap());
+    registry.close().await;
+}

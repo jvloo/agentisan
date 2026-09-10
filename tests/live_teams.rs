@@ -46,6 +46,19 @@ async fn both_provider_topologies_exchange_real_mcp_messages() {
     let registry = Registry::open(&fixture::database_path(&data).unwrap())
         .await
         .unwrap();
+    registry
+        .register_fixture(
+            &Fixture {
+                schema_version: 1,
+                groups: vec![],
+                teams: vec![],
+                agents: vec![],
+                principals: vec![],
+            },
+            &[],
+        )
+        .await
+        .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_agentisan"))
         .arg("--data-dir")
         .arg(&data)

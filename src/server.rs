@@ -108,7 +108,8 @@ pub fn router(registry: Registry) -> Router {
         )
         .route("/v1/inspect", post(inspect))
         .route("/v1/team-action", post(team_action))
-        .layer(axum::extract::DefaultBodyLimit::max(16_384))
+        // A 16 KiB semantic result may require 6x that space when JSON-escaped.
+        .layer(axum::extract::DefaultBodyLimit::max(131_072))
         .with_state(registry)
 }
 

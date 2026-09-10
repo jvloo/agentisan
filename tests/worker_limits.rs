@@ -53,12 +53,12 @@ wait
         credential_file: temp.path().join("unused-token"),
         native_id: None,
         deadline: now() + 30,
-        turn_timeout: 1,
+        turn_timeout: 2,
         team_id: "csv_export".into(),
     };
     let start = Instant::now();
     let result = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(6),
         worker::run_with_host(
             registry.clone(),
             work,
@@ -69,14 +69,9 @@ wait
     )
     .await
     .expect("supervisor must return within its own deadline");
-    assert!(
-        result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("stdin transfer timed out")
-    );
-    assert!(start.elapsed() < Duration::from_secs(4));
+    let error = result.err().unwrap().to_string();
+    assert!(error.contains("stdin transfer"), "{error}");
+    assert!(start.elapsed() < Duration::from_secs(5));
     let child: i32 = std::fs::read_to_string(format!("{}.child", script.display()))
         .unwrap()
         .parse()
@@ -97,5 +92,107 @@ wait
         stopped,
         "owned child must not remain running after deadline"
     );
+    registry.close().await;
+}
+
+async fn mock_work(
+    script_body: &str,
+    timeout: u64,
+) -> (tempfile::TempDir, Registry, Work, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let registry = Registry::open(&fixture::database_path(&data).unwrap())
+        .await
+        .unwrap();
+    let fx: Fixture = serde_json::from_str(include_str!("../examples/registry.json")).unwrap();
+    let hashes: Vec<_> = fx
+        .principals
+        .iter()
+        .map(|p| CredentialHash {
+            principal_id: p.id.clone(),
+            sha256: credential_hash(p.id.as_str()),
+        })
+        .collect();
+    registry.register_fixture(&fx, &hashes).await.unwrap();
+    let script = temp.path().join("mock.sh");
+    std::fs::write(&script, script_body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let work = Work {
+        run_id: "run_mock".into(),
+        turn_id: "turn_mock".into(),
+        agent: MemberConfig {
+            id: "inventory_lead".into(),
+            name: "Lead".into(),
+            role: AgentRole::Lead,
+            provider: Provider::Claude,
+            executable: script,
+            model: "mock".into(),
+            effort: "low".into(),
+            instructions: "Test".into(),
+        },
+        credential_file: temp.path().join("unused"),
+        native_id: None,
+        deadline: now() + 30,
+        turn_timeout: timeout,
+        team_id: "csv_export".into(),
+    };
+    (temp, registry, work, data)
+}
+
+#[tokio::test]
+async fn slow_preflight_obeys_the_original_turn_deadline() {
+    let (_temp, registry, work, data) = mock_work("#!/bin/sh\nexec sleep 60\n", 1).await;
+    let start = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(4),
+        worker::run_with_host(
+            registry.clone(),
+            work,
+            &data,
+            "http://127.0.0.1:1",
+            std::path::Path::new(env!("CARGO_BIN_EXE_agentisan")),
+        ),
+    )
+    .await
+    .expect("preflight must be bounded by the turn deadline");
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("preflight timed out")
+    );
+    assert!(start.elapsed() < Duration::from_secs(3));
+    registry.close().await;
+}
+
+#[tokio::test]
+async fn a_flooding_native_cli_cannot_write_more_than_the_output_cap() {
+    let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo mock; exit 0; fi
+if [ "$1" = "auth" ]; then echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'; exit 0; fi
+dd if=/dev/zero bs=1048576 count=20 2>/dev/null
+"#;
+    let (_temp, registry, work, data) = mock_work(script, 5).await;
+    let result = worker::run_with_host(
+        registry.clone(),
+        work,
+        &data,
+        "http://127.0.0.1:1",
+        std::path::Path::new(env!("CARGO_BIN_EXE_agentisan")),
+    )
+    .await;
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("output limit exceeded")
+    );
+    let logs = data.join("runs/run_mock/inventory_lead/turn_mock");
+    let bytes = std::fs::metadata(logs.join("stdout.jsonl")).unwrap().len()
+        + std::fs::metadata(logs.join("stderr.txt")).unwrap().len();
+    assert!(bytes <= 8_388_608);
+    assert!(logs.join("output-truncated.json").is_file());
     registry.close().await;
 }
