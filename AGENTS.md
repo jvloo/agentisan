@@ -2,9 +2,9 @@
 
 Read README.md for current status and docs/architecture.md for the proposed contracts.
 ROADMAP.md records implementation milestones. Keep shipped behavior distinct from design
-intent. Milestone 1 implements a Rust CLI, loopback inspection service, SQLite registry,
-and stdio MCP connector for simulated agent fixtures. Worker execution and native session
-discovery are not implemented. Read docs/milestone-1.md for the current trust boundary.
+intent. The Rust service includes registry inspection and managed Claude/Codex CLI teams
+with real MCP messaging. Read docs/live-teams.md for current execution and recovery limits;
+docs/milestone-1.md records the original fixture-registry boundary.
 
 ## Checks
 
@@ -16,8 +16,9 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-Integration tests use temporary databases and actual CLI/MCP subprocesses. They require
-loopback networking but make no model calls. Keep stdout reserved for JSON/MCP output.
+Ordinary integration tests use temporary databases and actual CLI/MCP subprocesses, with
+loopback networking and no model calls. Live account tests are explicitly opt-in and keep
+their records private. Keep stdout reserved for JSON/MCP output.
 
 ## Product constraints
 

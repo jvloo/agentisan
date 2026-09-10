@@ -22,6 +22,9 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-std", "io-util", "process", "time"] }
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["signal", "process"] }
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -31,7 +31,7 @@ type Result<T> = std::result::Result<T, RegistryError>;
 
 #[derive(Clone)]
 pub struct Registry {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 pub fn credential_hash(token: &str) -> String {
@@ -68,12 +68,17 @@ impl Registry {
             0 => {
                 sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
             }
-            1 => {}
+            1 | 2 => {}
             _ => {
                 return Err(RegistryError::Invalid(
                     "unsupported database schema version".into(),
                 ));
             }
+        }
+        if version < 2 {
+            sqlx::raw_sql(crate::teams::SCHEMA)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(Self { pool })
@@ -193,9 +198,16 @@ impl Registry {
         let principal: Principal =
             serde_json::from_str(&payload.ok_or(RegistryError::Unauthorized)?)?;
         match query {
-            Query::Whoami {} => Ok(
-                json!({"status":if principal.agent_id.is_some() {"bound"} else {"unbound"},"principal_id":principal.id,"agent_id":principal.agent_id,"evidence":"fixture_credential","source":"fixture"}),
-            ),
+            Query::Whoami {} => {
+                let managed: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM team_members WHERE agent_id=?")
+                        .bind(principal.agent_id.as_ref().map(AgentId::as_str))
+                        .fetch_one(&self.pool)
+                        .await?;
+                Ok(
+                    json!({"status":if principal.agent_id.is_some() {"bound"} else {"unbound"},"principal_id":principal.id,"agent_id":principal.agent_id,"evidence":if managed>0 {"managed_credential"} else {"fixture_credential"},"source":if managed>0 {"managed_cli"} else {"fixture"}}),
+                )
+            }
             Query::GroupsList {} => {
                 let rows = sqlx::query("SELECT g.payload FROM groups g JOIN grants p ON p.group_id=g.id WHERE p.principal_id=? ORDER BY g.id")
                     .bind(principal.id.as_str()).fetch_all(&self.pool).await?;
@@ -231,10 +243,28 @@ impl Registry {
                 let payload: Option<String> = sqlx::query_scalar("SELECT a.payload FROM agents a JOIN teams t ON t.id=a.team_id JOIN grants p ON p.group_id=t.group_id WHERE a.id=? AND p.principal_id=?")
                     .bind(agent_id.as_str()).bind(principal.id.as_str()).fetch_optional(&self.pool).await?;
                 let agent: Agent = serde_json::from_str(&payload.ok_or(RegistryError::NotFound)?)?;
+                let managed: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM team_members WHERE agent_id=?")
+                        .bind(agent.id.as_str())
+                        .fetch_one(&self.pool)
+                        .await?;
+                if managed > 0 {
+                    let state: Option<String> = sqlx::query_scalar(
+                        "SELECT state FROM turns WHERE agent_id=? ORDER BY rowid DESC LIMIT 1",
+                    )
+                    .bind(agent.id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?;
+                    return Ok(
+                        json!({"agent":agent,"source":"managed_cli","activity":state.unwrap_or_else(||"not_started".into()),"capabilities":{"inspect":true,"messages":true,"native_open":false,"native_resume":false,"shell_execution":false}}),
+                    );
+                }
                 Ok(
                     json!({"agent":agent,"source":"fixture","connection":"unverified","activity":"unobserved","capabilities":{"inspect":true,"native_open":false,"native_resume":false,"execute":false}}),
                 )
             }
+            Query::RunsInspect { run_id } => crate::teams::inspect_run(self, token, &run_id).await,
+            Query::MessagesList { run_id } => crate::teams::messages(self, token, &run_id).await,
         }
     }
 

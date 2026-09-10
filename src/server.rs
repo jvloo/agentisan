@@ -60,6 +60,44 @@ async fn inspect(
         .map_err(public_error)
 }
 
+async fn team_action(
+    State(registry): State<Registry>,
+    headers: HeaderMap,
+    Json(action): Json<crate::teams::Action>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if headers.contains_key("origin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"browser_origin_not_allowed"})),
+        ));
+    }
+    let values: Vec<_> = headers.get_all("authorization").iter().collect();
+    let token = match values.as_slice() {
+        [h] => h
+            .to_str()
+            .ok()
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .filter(|v| !v.is_empty()),
+        _ => None,
+    }
+    .ok_or_else(|| public_error(RegistryError::Unauthorized))?;
+    crate::teams::act(&registry, token, action)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            if e.downcast_ref::<RegistryError>()
+                .is_some_and(|x| matches!(x, RegistryError::Unauthorized))
+            {
+                public_error(RegistryError::Unauthorized)
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":e.to_string()})),
+                )
+            }
+        })
+}
+
 pub fn router(registry: Registry) -> Router {
     Router::new()
         .route(
@@ -69,18 +107,60 @@ pub fn router(registry: Registry) -> Router {
             }),
         )
         .route("/v1/inspect", post(inspect))
+        .route("/v1/team-action", post(team_action))
         .layer(axum::extract::DefaultBodyLimit::max(16_384))
         .with_state(registry)
 }
 
-pub async fn serve(registry: Registry, listener: TcpListener) -> anyhow::Result<()> {
+pub async fn serve(
+    registry: Registry,
+    listener: TcpListener,
+    workers: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     if !listener.local_addr()?.ip().is_loopback() {
         anyhow::bail!("only loopback listeners are supported");
     }
-    axum::serve(listener, router(registry))
+    let task = if let Some(data_dir) = workers {
+        crate::teams::recover_interrupted(&registry).await?;
+        let registry = registry.clone();
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        Some(tokio::spawn(async move {
+            loop {
+                match crate::teams::next(&registry).await {
+                    Ok(Some(work)) => {
+                        let result = crate::worker::run(
+                            registry.clone(),
+                            work.clone(),
+                            &data_dir,
+                            &endpoint,
+                        )
+                        .await;
+                        if let Err(e) = crate::teams::finish(&registry, &work, result).await {
+                            eprintln!("cannot record worker result: {e}");
+                            break;
+                        }
+                    }
+                    Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                    Err(e) => {
+                        eprintln!("worker scheduler stopped: {e}");
+                        break;
+                    }
+                }
+            }
+        }))
+    } else {
+        None
+    };
+    let result = axum::serve(listener, router(registry.clone()))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await?;
+        .await;
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+        crate::teams::recover_interrupted(&registry).await?;
+    }
+    result?;
     Ok(())
 }

@@ -6,10 +6,15 @@ Agentisan is a local toolkit for making groups of agent teams identifiable and i
 from existing CLI and Desktop clients. Its longer-term goal is bounded collaboration across
 providers, with persistent work records and explicit human decisions.
 
-**Current status: Milestone 1, simulated-agent registry.** The Rust CLI, local inspection
-service, SQLite persistence, and stdio MCP connector are implemented. Worker execution,
-native session discovery, agent messaging, budgets, approvals, and native deep links remain
-planned. No model API credentials or paid model calls are needed for this milestone.
+**Current status: reusable native CLI teams.** The Rust service can run a Claude lead with
+Codex workers and the reverse, with real peer-to-peer MCP messages and persistent native
+session IDs. Live execution currently supports macOS/Linux and consultation profiles;
+shell/file-editing tools are disabled. Human approval workflows, general job reconciliation,
+direct model-API workers, and native deep-link opening remain planned.
+
+Start with the [live-team guide](docs/live-teams.md) and either the
+[Claude-led](examples/claude-led-team.json) or [Codex-led](examples/codex-led-team.json)
+configuration. The fixture walkthrough below exercises inspection without model calls.
 
 ## What works
 
@@ -20,12 +25,17 @@ planned. No model API credentials or paid model calls are needed for this milest
 - Reject conflicting registrations; repeating an identical fixture is idempotent.
 - Restrict inspection to the groups granted to the connector's credential.
 - Return `unbound` when no credential or no simulated agent binding is present.
+- Register reusable managed teams, submit objectives, and inspect persistent run/message history.
+- Deliver real messages through MCP between the lead and workers and directly between workers.
+- Bound CLI invocations, message count, elapsed time, and output; stop stalled work.
+- Preserve exact native sessions between turns, with explicit resume of inspected unread work.
 
-All bindings currently come from a fixture. A `bound` result **does not prove that a real
-Claude, Codex, or other native conversation is the caller**. Connection and activity are
-reported as unverified and unobserved; the example agents are not live processes.
+Fixture bindings remain simulated. Managed bindings record IDs returned by configured native
+CLIs. `bound` identifies the provisioned credential; it does not independently authenticate
+the enclosing chat or prove that every caller holding that credential is the native process.
+Fixture activity remains unobserved; managed turn activity is tracked separately.
 
-## Build and try
+## Build and try the fixture registry
 
 Install Rust through [rustup](https://rust-lang.org/tools/install/). The repository pins the
 toolchain in [rust-toolchain.toml](rust-toolchain.toml); dependencies are locked. Build from
@@ -78,9 +88,11 @@ absolute path to the built `agentisan` executable, using arguments shaped like:
 ```
 
 The enclosing configuration format depends on the client. The connector exposes `whoami`,
-`groups_list`, `teams_list`, `agents_list`, and `agents_inspect`. There are no mutation or
-execution tools. Each connector has one explicitly provisioned credential; sharing that
-connector across conversations shares its access and does not identify those conversations.
+`groups_list`, `teams_list`, `agents_list`, `agents_inspect`, `runs_inspect`, and `messages_list`
+for inspection. Managed agents additionally use `messages_receive`, `messages_send`, and
+`runs_complete` during their active turn. These do not expose shell execution, administrative
+registration, or human approval. Each connector has one explicitly provisioned credential;
+sharing it across conversations shares access and does not identify those conversations.
 
 The MCP connector queries the separate service. Closing the connector leaves the service
 and its records available. Closing the service requires restarting it before inspection can
@@ -94,10 +106,11 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-Tests cover registry invariants and the actual CLI, HTTP, and MCP stdio interfaces using
-temporary data. They exercise caller isolation, conflicting imports, connector exit, and
-service restart. They do not establish live-provider, execution-sandbox, or job-recovery
-guarantees. CI runs the checks on Linux, macOS, and Windows.
+Ordinary tests cover registry invariants, messaging/limits, CLI/HTTP/MCP parity, initialization
+locking, persistence, and Unix process deadlines. They make no model calls. The separate
+[opt-in live test](docs/live-teams.md#repeat-the-live-acceptance-test) runs both provider
+topologies and verifies actual message routes and native session continuity. CI runs the
+ordinary checks on Linux, macOS, and Windows; Windows CLI execution is not supported yet.
 
 This is a local development milestone. The OS account controlling the data directory is
 trusted and can administer every fixture identity. Credential-based group filtering is not
@@ -108,6 +121,7 @@ the service through a proxy or tunnel. See the [Milestone 1 contract](docs/miles
 
 - [Architecture](docs/architecture.md): the intended team runtime and its boundaries.
 - [Rust decision](docs/decisions/0001-rust-core.md): stack choice and deferred decisions.
+- [Live teams](docs/live-teams.md): real execution, inspection, limits, and validation.
 - [Roadmap](ROADMAP.md): remaining milestones and acceptance criteria.
 - [Agent contribution instructions](AGENTS.md).
 - [MIT license](LICENSE).

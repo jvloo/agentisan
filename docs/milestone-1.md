@@ -1,5 +1,8 @@
 # Milestone 1: registry and inspection
 
+This records the original milestone. [Live teams](live-teams.md) describes the additional
+managed execution and messaging now available. The fixture-specific guarantees below remain.
+
 Implemented scope: a single Rust executable, an explicit fixture importer, a persistent
 SQLite registry, a loopback HTTP inspection service, a CLI client, and a stdio MCP connector.
 The example describes simulated agents; none of them executes a model or a tool.

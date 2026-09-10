@@ -111,3 +111,79 @@ fn credentials_reject_shared_permissions_and_symlinks() {
     assert!(agentisan::fixture::database_path(&state).is_err());
     assert!(!absent.exists());
 }
+
+#[tokio::test]
+async fn initializer_lock_covers_other_processes_before_any_credential_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/registry.json");
+    let lock = agentisan::fixture::admin_lock(&data).unwrap();
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentisan"))
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["init", "--fixture"])
+        .arg(&fixture)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!data.join("credentials").exists());
+    drop(lock);
+    initialize(&data, &fixture).await.unwrap();
+    assert!(data.join("credentials/inventory_reader.token").is_file());
+}
+
+#[tokio::test]
+async fn case_distinct_principals_remain_distinct_and_legacy_files_migrate() {
+    use agentisan::model::{Fixture, Principal};
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let mut fx: Fixture = serde_json::from_str(include_str!("../examples/registry.json")).unwrap();
+    fx.principals = vec![
+        Principal {
+            id: "Ops".into(),
+            agent_id: None,
+            group_ids: vec!["inventory".into()],
+        },
+        Principal {
+            id: "ops".into(),
+            agent_id: None,
+            group_ids: vec!["inventory".into()],
+        },
+    ];
+    let path = temp.path().join("fixture.json");
+    std::fs::write(&path, serde_json::to_vec(&fx).unwrap()).unwrap();
+    let files = initialize(&data, &path).await.unwrap();
+    assert_ne!(
+        files[0].to_string_lossy().to_lowercase(),
+        files[1].to_string_lossy().to_lowercase()
+    );
+    let first = read_credential(&files[0]).unwrap();
+    let second = read_credential(&files[1]).unwrap();
+    assert_ne!(first, second);
+    let r = Registry::open(&data.join("registry.sqlite3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.inspect(Some(&first), Query::Whoami {}).await.unwrap()["principal_id"],
+        "Ops"
+    );
+    assert_eq!(
+        r.inspect(Some(&second), Query::Whoami {}).await.unwrap()["principal_id"],
+        "ops"
+    );
+    r.close().await;
+
+    // A separate legacy installation had only the uppercase identity registered.
+    let legacy_data = temp.path().join("legacy-state");
+    fx.principals.truncate(1);
+    std::fs::write(&path, serde_json::to_vec(&fx).unwrap()).unwrap();
+    let files = initialize(&legacy_data, &path).await.unwrap();
+    let token = read_credential(&files[0]).unwrap();
+    let legacy = legacy_data.join("credentials/Ops.token");
+    std::fs::rename(&files[0], &legacy).unwrap();
+    let migrated = initialize(&legacy_data, &path).await.unwrap();
+    assert!(legacy.is_file());
+    assert_eq!(read_credential(&migrated[0]).unwrap(), token);
+}

@@ -3,7 +3,7 @@ use agentisan::{
     fixture, mcp,
     model::{AgentId, GroupId, Query, TeamId},
     registry::Registry,
-    server,
+    server, teams,
 };
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -28,6 +28,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    WorkerHost {
+        #[arg(long)]
+        exit_file: PathBuf,
+        #[arg(long)]
+        timeout_ms: u64,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Local administration: import an immutable fake-adapter fixture and provision credentials.
     Init {
         #[arg(long)]
@@ -37,6 +46,9 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:7437")]
         listen: SocketAddr,
+        /// Explicitly allow execution of configured Claude/Codex CLI turns (macOS/Linux).
+        #[arg(long)]
+        enable_cli_workers: bool,
     },
     /// Connect an MCP host over stdio. Registry records remain in the separate service.
     Mcp,
@@ -54,6 +66,14 @@ enum Command {
         #[command(subcommand)]
         command: AgentsCommand,
     },
+    Runs {
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
+    Messages {
+        #[command(subcommand)]
+        command: MessagesCommand,
+    },
 }
 #[derive(Subcommand)]
 enum GroupsCommand {
@@ -64,6 +84,47 @@ enum TeamsCommand {
     List {
         #[arg(long)]
         group: String,
+    },
+    /// Register a reusable managed team from an explicit local configuration.
+    Create {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Submit a real objective to the independently running worker service.
+    Run {
+        #[arg(long)]
+        team: String,
+        #[arg(long)]
+        prompt_file: PathBuf,
+        #[arg(long)]
+        live: bool,
+        #[arg(long, default_value_t = 18)]
+        max_turns: u32,
+        #[arg(long, default_value_t = 64)]
+        max_messages: u32,
+        #[arg(long, default_value_t = 900)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = 120)]
+        turn_timeout_seconds: u64,
+    },
+}
+#[derive(Subcommand)]
+enum RunsCommand {
+    Inspect {
+        run_id: String,
+    },
+    /// Resume unread work after inspecting a stalled run; original limits stay in force.
+    Resume {
+        run_id: String,
+        #[arg(long)]
+        after_inspection: bool,
+    },
+}
+#[derive(Subcommand)]
+enum MessagesCommand {
+    List {
+        #[arg(long)]
+        run: String,
     },
 }
 #[derive(Subcommand)]
@@ -81,6 +142,13 @@ enum AgentsCommand {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let query = match cli.command {
+        Command::WorkerHost {
+            exit_file,
+            timeout_ms,
+            command,
+        } => {
+            return agentisan::worker::host(&exit_file, timeout_ms, &command);
+        }
         Command::Init { fixture: path } => {
             let credentials = fixture::initialize(&cli.data_dir, &path).await?;
             println!(
@@ -91,7 +159,10 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
-        Command::Serve { listen } => {
+        Command::Serve {
+            listen,
+            enable_cli_workers,
+        } => {
             if !listen.ip().is_loopback() {
                 bail!("only loopback listeners are supported");
             }
@@ -99,6 +170,15 @@ async fn main() -> Result<()> {
             if !path.is_file() {
                 bail!("registry not initialized; use agentisan init --fixture <file>");
             }
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(cli.data_dir.join("service.lock"))?;
+            lock.try_lock().map_err(|_| {
+                anyhow::anyhow!("another Agentisan service owns this data directory")
+            })?;
             let registry = Registry::open(&path).await?;
             let listener = tokio::net::TcpListener::bind(listen).await?;
             // A single machine-readable readiness line; no credentials or records.
@@ -106,7 +186,18 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::json!({"service":"agentisan","address":listener.local_addr()?.to_string()})
             );
-            return server::serve(registry, listener).await;
+            let result = server::serve(
+                registry,
+                listener,
+                if enable_cli_workers {
+                    Some(cli.data_dir.canonicalize()?)
+                } else {
+                    None
+                },
+            )
+            .await;
+            drop(lock);
+            return result;
         }
         Command::Mcp => {
             return mcp::run(Client::new(&cli.endpoint, cli.credential_file.as_deref())?).await;
@@ -120,6 +211,76 @@ async fn main() -> Result<()> {
         } => Query::TeamsList {
             group_id: GroupId(group),
         },
+        Command::Teams {
+            command: TeamsCommand::Create { config },
+        } => {
+            let text = std::fs::read_to_string(config)?;
+            if text.len() > 131072 {
+                bail!("team configuration too large");
+            }
+            let config: teams::TeamConfig = serde_json::from_str(&text)?;
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let out = teams::create(&registry, &cli.data_dir.canonicalize()?, &config).await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            return Ok(());
+        }
+        Command::Teams {
+            command:
+                TeamsCommand::Run {
+                    team,
+                    prompt_file,
+                    live,
+                    max_turns,
+                    max_messages,
+                    timeout_seconds,
+                    turn_timeout_seconds,
+                },
+        } => {
+            if !live {
+                bail!("teams run requires --live to authorize actual provider calls");
+            }
+            let objective = std::fs::read_to_string(prompt_file)?;
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let id = teams::start(
+                &registry,
+                &team,
+                &objective,
+                max_turns,
+                max_messages,
+                timeout_seconds,
+                turn_timeout_seconds,
+            )
+            .await?;
+            registry.close().await;
+            println!("{}", serde_json::json!({"run_id":id,"state":"queued"}));
+            return Ok(());
+        }
+        Command::Runs {
+            command: RunsCommand::Inspect { run_id },
+        } => Query::RunsInspect { run_id },
+        Command::Runs {
+            command:
+                RunsCommand::Resume {
+                    run_id,
+                    after_inspection,
+                },
+        } => {
+            if !after_inspection {
+                bail!("inspect the run first, then acknowledge with --after-inspection");
+            }
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            teams::resume(&registry, &run_id).await?;
+            registry.close().await;
+            println!(
+                "{}",
+                serde_json::json!({"run_id":run_id,"state":"running","limits":"unchanged"})
+            );
+            return Ok(());
+        }
+        Command::Messages {
+            command: MessagesCommand::List { run },
+        } => Query::MessagesList { run_id: run },
         Command::Agents {
             command: AgentsCommand::List { team },
         } => Query::AgentsList {

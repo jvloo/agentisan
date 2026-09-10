@@ -1,0 +1,41 @@
+{
+  "kind": "live_account_cli_mcp_acceptance",
+  "scope": "communication and native session continuity; not a quality or cost comparison",
+  "topologies": [
+    {
+      "lead_provider": "claude",
+      "state": "completed",
+      "cli_invocations": 5,
+      "agent_messages": 6,
+      "verified_routes": 6,
+      "distinct_native_sessions": 3,
+      "session_continuity": true,
+      "requested_models": [
+        "gpt-6-astra",
+        "sonnet"
+      ],
+      "cli_versions": [
+        "2.1.263 (Claude Code)",
+        "codex-cli 0.153.4"
+      ]
+    },
+    {
+      "lead_provider": "codex",
+      "state": "completed",
+      "cli_invocations": 5,
+      "agent_messages": 6,
+      "verified_routes": 6,
+      "distinct_native_sessions": 3,
+      "session_continuity": true,
+      "requested_models": [
+        "gpt-6-astra",
+        "sonnet"
+      ],
+      "cli_versions": [
+        "2.1.263 (Claude Code)",
+        "codex-cli 0.153.4"
+      ]
+    }
+  ],
+  "earlier_development_attempts": "Retained privately, including session-store sandbox denial, disabled Codex MCP host, and an empty-final-text parser rejection. Missing usage is not treated as zero."
+}

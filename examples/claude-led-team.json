@@ -1,0 +1,9 @@
+{
+  "group": {"id": "work", "name": "Work"},
+  "team": {"id": "claude_team", "group_id": "work", "name": "Claude-led team"},
+  "agents": [
+    {"id": "claude_lead", "name": "Lead", "role": "lead", "provider": "claude", "executable": "/absolute/path/to/claude", "model": "sonnet", "effort": "low", "instructions": "Break down the objective, assign work to both specialists, and combine their reports. Require peer discussion when it helps resolve a question."},
+    {"id": "codex_a", "name": "First specialist", "role": "worker", "provider": "codex", "executable": "/absolute/path/to/codex", "model": "gpt-6-astra", "effort": "low", "instructions": "Investigate your assignment. Exchange relevant findings with codex_b, then report your conclusion to claude_lead. End your turn while waiting for new input."},
+    {"id": "codex_b", "name": "Second specialist", "role": "worker", "provider": "codex", "executable": "/absolute/path/to/codex", "model": "gpt-6-astra", "effort": "low", "instructions": "Investigate your assignment independently. Exchange relevant findings with codex_a, then report your conclusion to claude_lead. Avoid acknowledgement-only message loops."}
+  ]
+}

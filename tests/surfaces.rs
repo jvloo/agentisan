@@ -179,9 +179,11 @@ async fn cli_and_mcp_parity_with_connector_disconnect_and_service_restart() {
         .iter()
         .map(|x| x["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 5);
+    assert_eq!(names.len(), 10);
     for tool in tools["result"]["tools"].as_array().unwrap() {
-        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        let mutating = ["messages_send", "messages_receive", "runs_complete"]
+            .contains(&tool["name"].as_str().unwrap());
+        assert_eq!(tool["annotations"]["readOnlyHint"], !mutating);
         assert_eq!(tool["annotations"]["destructiveHint"], false);
     }
     for name in [

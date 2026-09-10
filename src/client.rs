@@ -44,7 +44,17 @@ impl Client {
     }
 
     pub async fn inspect(&self, query: Query) -> Result<Value> {
-        let mut request = self.http.post(self.endpoint.clone()).json(&query);
+        self.request(self.endpoint.clone(), &query).await
+    }
+
+    pub async fn act(&self, action: crate::teams::Action) -> Result<Value> {
+        let mut url = self.endpoint.clone();
+        url.set_path("/v1/team-action");
+        self.request(url, &action).await
+    }
+
+    async fn request(&self, url: reqwest::Url, body: &impl serde::Serialize) -> Result<Value> {
+        let mut request = self.http.post(url).json(body);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
@@ -53,12 +63,16 @@ impl Client {
             .await
             .context("cannot reach Agentisan service")?;
         let status = response.status();
-        if !status.is_success() {
-            bail!("inspection failed: HTTP {status}");
-        }
         let bytes = response.bytes().await?;
         if bytes.len() > 4_194_304 {
             bail!("service response is too large");
+        }
+        if !status.is_success() {
+            let message = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| "request rejected".into());
+            bail!("request failed: HTTP {status}: {message}");
         }
         serde_json::from_slice(&bytes).context("invalid service response")
     }
