@@ -165,7 +165,7 @@ pub async fn create(registry: &Registry, data_dir: &Path, config: &TeamConfig) -
     private_dir(&root)?;
     let mut created = Vec::new();
     let result=async {
-        let mut tx=registry.pool.begin().await?;
+        let mut tx=registry.pool.begin_with("BEGIN IMMEDIATE").await?;
         let exists:Option<String>=sqlx::query_scalar("SELECT payload FROM groups WHERE id=?").bind(config.group.id.as_str()).fetch_optional(&mut *tx).await?;
         let payload=serde_json::to_string(&config.group)?;
         if let Some(old)=exists {if old!=payload {bail!("group already has another definition");}}
@@ -230,7 +230,7 @@ pub async fn start(
         .find(|a| a.role == AgentRole::Lead)
         .ok_or_else(|| anyhow::anyhow!("managed team not found"))?;
     let id = new_id("run");
-    let mut tx = registry.pool.begin().await?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("INSERT INTO runs(id,team_id,lead_id,state,objective,max_turns,max_messages,deadline,turn_timeout,created_at) VALUES(?,?,?,'queued',?,?,?,?,?,?)")
         .bind(&id).bind(team).bind(lead.id.as_str()).bind(objective).bind(max_turns).bind(max_messages).bind(now()+timeout as i64).bind(turn_timeout as i64).bind(now()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO messages(id,run_id,sender,recipient,body,dedup_key,created_at) VALUES(?,?,'human',?,?,'initial-objective',?)")
@@ -298,7 +298,7 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
         .agent_id
         .ok_or_else(|| anyhow::anyhow!("an agent binding is required"))?;
     let run = action.run_id().to_owned();
-    let mut tx = registry.pool.begin().await?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     let row=sqlx::query("SELECT r.* FROM runs r JOIN agents a ON a.team_id=r.team_id JOIN team_members m ON m.agent_id=a.id WHERE r.id=? AND a.id=?")
         .bind(&run).bind(agent.as_str()).fetch_optional(&mut *tx).await?.ok_or_else(||anyhow::anyhow!("run not found"))?;
     let state: String = row.get("state");
@@ -425,7 +425,7 @@ pub async fn record_binding(
     native_id: &str,
 ) -> Result<()> {
     uuid::Uuid::parse_str(native_id)?;
-    let mut tx = registry.pool.begin().await?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     let active: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM turns WHERE run_id=? AND agent_id=? AND state='running'",
     )
@@ -468,7 +468,7 @@ pub async fn record_binding(
 }
 
 pub async fn next(registry: &Registry) -> Result<Option<Work>> {
-    let mut tx = registry.pool.begin().await?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE runs SET state='exhausted',error='run deadline reached' WHERE state IN ('queued','running') AND deadline<=?").bind(now()).execute(&mut *tx).await?;
     let row=sqlx::query("SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload FROM runs r JOIN messages m ON m.run_id=r.id JOIN team_members tm ON tm.agent_id=m.recipient JOIN agents a ON a.id=tm.agent_id WHERE r.state IN ('queued','running') AND m.delivered_turn IS NULL AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running') ORDER BY m.seq LIMIT 1").fetch_optional(&mut *tx).await?;
     let Some(row) = row else {
@@ -520,7 +520,7 @@ pub async fn finish(
     work: &Work,
     result: Result<crate::worker::TurnResult>,
 ) -> Result<()> {
-    let mut tx = registry.pool.begin().await?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     match result {
         Ok(result) => {
             sqlx::query("UPDATE turns SET state='completed',ended_at=?,native_id=?,output=?,usage=?,artifacts=? WHERE id=?")
@@ -554,7 +554,7 @@ pub async fn finish(
 }
 
 pub async fn recover_interrupted(registry: &Registry) -> Result<()> {
-    let mut tx = registry.pool.begin().await?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE runs SET state='interrupted',error='service restarted; inspect persisted messages and native sessions before retrying' WHERE state IN ('running','completing')").execute(&mut *tx).await?;
     sqlx::query("UPDATE turns SET state='unknown',error='service restarted before completion receipt' WHERE state='running'").execute(&mut *tx).await?;
     tx.commit().await?;
@@ -564,7 +564,7 @@ pub async fn recover_interrupted(registry: &Registry) -> Result<()> {
 /// Administrative continuation after inspection. Never resets budgets or replays a
 /// failed/unknown native invocation; only unread messages after successful turns qualify.
 pub async fn resume(registry: &Registry, id: &str) -> Result<()> {
-    let mut tx = registry.pool.begin().await?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     let row = sqlx::query("SELECT state,deadline,turns,max_turns FROM runs WHERE id=?")
         .bind(id)
         .fetch_optional(&mut *tx)

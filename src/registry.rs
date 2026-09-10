@@ -60,7 +60,7 @@ impl Registry {
             .max_connections(1)
             .connect_with(options)
             .await?;
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&mut *tx)
             .await?;
@@ -106,7 +106,7 @@ impl Registry {
         credentials: &[CredentialHash],
     ) -> Result<()> {
         validate(fixture, credentials)?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for group in &fixture.groups {
             let payload = serde_json::to_string(group)?;
             if absent_or_equal(&mut tx, "groups", group.id.as_str(), &payload).await? {

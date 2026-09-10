@@ -310,7 +310,10 @@ async fn inspected_resume_preserves_native_ids_and_original_limits() {
 
 #[tokio::test]
 async fn concurrent_sends_cannot_spend_the_same_message_allowance() {
-    let (_temp, r, t) = setup().await;
+    let (temp, r, t) = setup().await;
+    let other = Registry::open(&temp.path().join("state/registry.sqlite3"))
+        .await
+        .unwrap();
     let run = teams::start(&r, "team", "Work", 4, 2, 120, 20)
         .await
         .unwrap();
@@ -338,7 +341,7 @@ async fn concurrent_sends_cannot_spend_the_same_message_allowance() {
         reply_to: None,
         idempotency_key: "two".into(),
     };
-    let (a, b) = tokio::join!(teams::act(&r, &t[0], one), teams::act(&r, &t[0], two));
+    let (a, b) = tokio::join!(teams::act(&r, &t[0], one), teams::act(&other, &t[0], two));
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     assert_eq!(
         teams::messages(&r, &t[0], &run).await.unwrap()["messages"]
@@ -348,6 +351,7 @@ async fn concurrent_sends_cannot_spend_the_same_message_allowance() {
         2
     );
     r.close().await;
+    other.close().await;
 }
 
 #[tokio::test]
