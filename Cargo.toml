@@ -1,0 +1,29 @@
+[package]
+name = "agentisan"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Local, inspectable agent-team registry with CLI and MCP access"
+license = "MIT"
+repository = "https://github.com/jvloo/agentisan"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+rmcp = { version = "3.3", features = ["transport-io", "schemars"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-std", "io-util", "process", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

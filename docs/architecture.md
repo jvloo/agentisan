@@ -1,6 +1,6 @@
 # Architecture (proposed)
 
-This document describes design decisions and execution boundaries for Agentisan. **No component described here is implemented.** Implementation language and durable-execution engine are undecided; existing durable-execution components will be evaluated before one is selected or built.
+This document describes Agentisan's intended runtime. **Milestone 1 implements only the simulated-agent registry and CLI/MCP inspection**, described in the [current contract](milestone-1.md). Execution, messaging, budgets, approvals, native bindings, and deep links below remain proposed. Rust is selected for the core ([decision](decisions/0001-rust-core.md)); the durable-execution engine remains undecided, pending evaluation of existing components.
 
 ## Goals and non-goals
 

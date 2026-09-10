@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {"id": "inventory", "name": "Inventory demo"},
+    {"id": "support", "name": "Support demo"}
+  ],
+  "teams": [
+    {"id": "csv_export", "group_id": "inventory", "name": "CSV export"},
+    {"id": "triage", "group_id": "support", "name": "Issue triage"}
+  ],
+  "agents": [
+    {
+      "id": "inventory_lead", "team_id": "csv_export", "name": "Lead", "role": "lead", "parent_agent_id": null,
+      "native_binding": {"adapter": "fake", "host_id": "demo", "namespace": "inventory", "session_id": "shared-root", "thread_id": "lead-thread", "subagent_id": null}
+    },
+    {
+      "id": "inventory_worker", "team_id": "csv_export", "name": "Backend", "role": "worker", "parent_agent_id": "inventory_lead",
+      "native_binding": {"adapter": "fake", "host_id": "demo", "namespace": "inventory", "session_id": "shared-root", "thread_id": "worker-thread", "subagent_id": "worker-1"}
+    },
+    {
+      "id": "support_lead", "team_id": "triage", "name": "Lead", "role": "lead", "parent_agent_id": null,
+      "native_binding": {"adapter": "fake", "host_id": "demo", "namespace": "support", "session_id": "shared-root", "thread_id": "lead-thread", "subagent_id": null}
+    }
+  ],
+  "principals": [
+    {"id": "inventory_reader", "agent_id": "inventory_lead", "group_ids": ["inventory"]},
+    {"id": "support_reader", "agent_id": "support_lead", "group_ids": ["support"]},
+    {"id": "observer", "agent_id": null, "group_ids": ["inventory"]}
+  ]
+}
