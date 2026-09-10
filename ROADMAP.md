@@ -1,6 +1,6 @@
 # Roadmap
 
-All milestones below are proposed and unimplemented except where marked. Dates are intentionally omitted. See [docs/architecture.md](docs/architecture.md) for the design these milestones implement, and [README.md](README.md) for context.
+Milestones 0 and 1 are implemented. Later milestones remain proposed. See [docs/architecture.md](docs/architecture.md) for the intended runtime, [docs/milestone-1.md](docs/milestone-1.md) for the current implementation boundary, and [README.md](README.md) for runnable commands.
 
 ## Milestone 0 — Design bootstrap
 
@@ -8,15 +8,17 @@ All milestones below are proposed and unimplemented except where marked. Dates a
 
 Acceptance:
 - README, architecture, and roadmap documents committed and internally consistent.
-- No claims of shipped code, installable packages, or passing tests.
+- The initial bootstrap distinguished design intent from implemented behavior.
 
 ## Milestone 1 — Registry and read-only inspection (fake adapters)
+
+**Status: implemented.** Rust CLI, SQLite registry, local inspection service, and stdio MCP connector. Automated tests use simulated bindings and actual CLI/MCP subprocesses; real session discovery and worker execution are not included.
 
 Goal: prove the registry, ID scheme, and inspection surface work end-to-end against simulated agents, with no real provider calls.
 
 Acceptance:
 - CLI commands `agentisan whoami`, `agentisan teams list`, `agentisan agents inspect <agent-id>` return correct, read-only results against a fake adapter.
-- MCP tools expose the same behavior as the CLI (parity), including short responses that link to evidence.
+- MCP tools expose the same inspection results as the CLI, including exact record IDs and explicit capability limits.
 - Registry correctly marks a binding **unbound** when no trusted per-call or host identity is available, and never infers the newest matching session as a substitute.
 - Tests demonstrate: repeated/duplicate agent registration is idempotent; two distinct callers with similar native identifiers are not conflated (caller isolation).
 

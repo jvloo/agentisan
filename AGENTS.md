@@ -2,8 +2,22 @@
 
 Read README.md for current status and docs/architecture.md for the proposed contracts.
 ROADMAP.md records implementation milestones. Keep shipped behavior distinct from design
-intent. At bootstrap this repository contains documentation only; there is no CLI,
-MCP server, test suite, or selected implementation stack.
+intent. Milestone 1 implements a Rust CLI, loopback inspection service, SQLite registry,
+and stdio MCP connector for simulated agent fixtures. Worker execution and native session
+discovery are not implemented. Read docs/milestone-1.md for the current trust boundary.
+
+## Checks
+
+Use the toolchain in rust-toolchain.toml and the committed Cargo.lock. Run:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+```
+
+Integration tests use temporary databases and actual CLI/MCP subprocesses. They require
+loopback networking but make no model calls. Keep stdout reserved for JSON/MCP output.
 
 ## Product constraints
 
