@@ -76,6 +76,361 @@ async fn commit(registry: &Registry, work: &teams::Work) -> Value {
     .unwrap()
 }
 
+fn assignment_args(run: &str) -> agentisan::assignments::CreateArgs {
+    agentisan::assignments::CreateArgs {
+        run_id: run.into(),
+        assignee: "a".into(),
+        parent_id: None,
+        objective: "Review supplied function".into(),
+        done_criteria: vec!["Provide executable regression evidence".into()],
+        scope_hash: "a".repeat(64),
+        deadline: teams::now() + 90,
+        turn_budget: 2,
+        message_budget: 3,
+        idempotency_key: "assign_a".into(),
+    }
+}
+
+async fn work_act(r: &Registry, work: &teams::Work, action: Action) -> anyhow::Result<Value> {
+    teams::act(
+        r,
+        &fixture::read_credential(&work.credential_file).unwrap(),
+        action,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn first_class_assignment_commits_atomically_and_only_assigned_work_blocks_completion() {
+    let (_temp, r, t) = setup().await;
+    let run = teams::start(&r, "team", "Review only with worker A", 10, 16, 120, 20)
+        .await
+        .unwrap();
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    let args = assignment_args(&run);
+    let staged = work_act(&r, &lead, Action::AssignmentCreate(args.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        staged,
+        work_act(&r, &lead, Action::AssignmentCreate(args.clone()))
+            .await
+            .unwrap()
+    );
+    let mut changed = args;
+    changed.objective = "Changed scope".into();
+    assert!(
+        work_act(&r, &lead, Action::AssignmentCreate(changed))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        teams::inspect_run(&r, &t[0], &run).await.unwrap()["message_count"],
+        1
+    );
+    assert!(
+        work_act(
+            &r,
+            &lead,
+            Action::Complete {
+                run_id: run.clone(),
+                result: "Too early".into()
+            }
+        )
+        .await
+        .is_err()
+    );
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+    let worker = teams::next(&r).await.unwrap().unwrap();
+    assert_eq!(worker.agent.id.as_str(), "a");
+    let id = staged["assignment_id"].as_str().unwrap().to_owned();
+    let inbox = work_act(
+        &r,
+        &worker,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox["work"]["assignments"][0]["state"], "open");
+    assert_eq!(inbox["work"]["assignments"][0]["remaining_turns"], 1);
+    assert!(
+        work_act(&r, &worker, Action::AssignmentCreate(assignment_args(&run)))
+            .await
+            .is_err()
+    );
+    assert!(
+        work_act(
+            &r,
+            &worker,
+            Action::AssignmentUpdate(agentisan::assignments::UpdateArgs {
+                run_id: run.clone(),
+                assignment_id: id.clone(),
+                state: "closed".into(),
+                idempotency_key: "unauthorized_close".into()
+            })
+        )
+        .await
+        .is_err()
+    );
+    work_act(
+        &r,
+        &worker,
+        Action::AssignmentUpdate(agentisan::assignments::UpdateArgs {
+            run_id: run.clone(),
+            assignment_id: id.clone(),
+            state: "reported".into(),
+            idempotency_key: "report".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let inbox = work_act(
+        &r,
+        &worker,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        inbox["work"]["assignments"][0]["state"], "open",
+        "report is staged until commit"
+    );
+    commit(&r, &worker).await;
+    teams::finish(&r, &worker, Ok(native_success()))
+        .await
+        .unwrap();
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    assert!(
+        work_act(
+            &r,
+            &lead,
+            Action::Complete {
+                run_id: run.clone(),
+                result: "Not closed".into()
+            }
+        )
+        .await
+        .is_err()
+    );
+    work_act(
+        &r,
+        &lead,
+        Action::AssignmentUpdate(agentisan::assignments::UpdateArgs {
+            run_id: run.clone(),
+            assignment_id: id,
+            state: "closed".into(),
+            idempotency_key: "close".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    work_act(
+        &r,
+        &lead,
+        Action::Complete {
+            run_id: run.clone(),
+            result: "Accepted assigned work; B was not assigned".into(),
+        },
+    )
+    .await
+    .unwrap();
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+    assert_eq!(
+        teams::inspect_run(&r, &t[0], &run).await.unwrap()["state"],
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
+    let (_temp, r, _t) = setup().await;
+    let run = teams::start(&r, "team", "Request a human decision", 10, 16, 120, 20)
+        .await
+        .unwrap();
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    let assignment = work_act(&r, &lead, Action::AssignmentCreate(assignment_args(&run)))
+        .await
+        .unwrap();
+    let assignment_id = assignment["assignment_id"].as_str().unwrap().to_owned();
+    let args = agentisan::assignments::DecisionArgs {
+        run_id: run.clone(),
+        assignment_id: Some(assignment_id),
+        question: "Approve exact supplied scope?".into(),
+        scope_hash: "a".repeat(64),
+        artifact_hash: "b".repeat(64),
+        options: vec!["approve".into(), "reject".into()],
+        blocking: true,
+        idempotency_key: "human_decision".into(),
+    };
+    let decision = work_act(&r, &lead, Action::DecisionRequest(args.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        decision,
+        work_act(&r, &lead, Action::DecisionRequest(args))
+            .await
+            .unwrap()
+    );
+    let id = decision["decision_id"].as_str().unwrap();
+    assert!(
+        agentisan::assignments::resolve_decision(
+            &r,
+            id,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "approve",
+            "human_admin"
+        )
+        .await
+        .is_err(),
+        "staged request cannot be resolved"
+    );
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+    assert!(
+        teams::next(&r).await.unwrap().is_none(),
+        "blocking human decision stops dispatch"
+    );
+    assert!(
+        agentisan::assignments::resolve_decision(
+            &r,
+            id,
+            &"c".repeat(64),
+            &"b".repeat(64),
+            "approve",
+            "human_admin"
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        agentisan::assignments::resolve_decision(
+            &r,
+            id,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "other",
+            "human_admin"
+        )
+        .await
+        .is_err()
+    );
+    let result = agentisan::assignments::resolve_decision(
+        &r,
+        id,
+        &"a".repeat(64),
+        &"b".repeat(64),
+        "approve",
+        "human_admin",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["state"], "resolved");
+    assert!(
+        agentisan::assignments::resolve_decision(
+            &r,
+            id,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "reject",
+            "other_admin"
+        )
+        .await
+        .is_err()
+    );
+    agentisan::assignments::invalidate_decision(&r, id)
+        .await
+        .unwrap();
+    assert!(
+        agentisan::assignments::resolve_decision(
+            &r,
+            id,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "approve",
+            "human_admin"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        teams::next(&r).await.unwrap().unwrap().agent.id.as_str(),
+        "a"
+    );
+}
+
+#[tokio::test]
+async fn assignments_reserve_and_enforce_slices_and_failed_turn_never_publishes() {
+    let (_temp, r, t) = setup().await;
+    let run = teams::start(&r, "team", "Bounded assignment", 10, 16, 120, 20)
+        .await
+        .unwrap();
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    let mut args = assignment_args(&run);
+    args.turn_budget = 20;
+    assert!(
+        work_act(&r, &lead, Action::AssignmentCreate(args.clone()))
+            .await
+            .is_err()
+    );
+    args.turn_budget = 1;
+    args.message_budget = 1;
+    work_act(&r, &lead, Action::AssignmentCreate(args))
+        .await
+        .unwrap();
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+    let worker = teams::next(&r).await.unwrap().unwrap();
+    work_act(
+        &r,
+        &worker,
+        Action::Send {
+            run_id: run.clone(),
+            to: "lead".into(),
+            body: "one permitted message".into(),
+            reply_to: None,
+            idempotency_key: "one".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        work_act(
+            &r,
+            &worker,
+            Action::Send {
+                run_id: run.clone(),
+                to: "b".into(),
+                body: "excess message".into(),
+                reply_to: None,
+                idempotency_key: "two".into()
+            }
+        )
+        .await
+        .is_err()
+    );
+    teams::finish(&r, &worker, Err(anyhow::anyhow!("native crash")))
+        .await
+        .unwrap();
+    assert_eq!(
+        teams::inspect_run(&r, &t[0], &run).await.unwrap()["message_count"],
+        2
+    );
+}
+
 #[tokio::test]
 async fn message_identity_deduplication_delivery_and_peer_scope_are_persistent() {
     let (_temp, r, mut t) = setup().await;
@@ -887,7 +1242,7 @@ async fn migration_preserves_v4_records_and_old_tokens_are_read_only() {
     let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display()))
         .await
         .unwrap();
-    sqlx::raw_sql("DROP TABLE turn_inputs; DROP TABLE turn_leases; DROP TABLE agent_epochs; DROP TABLE run_proposals; ALTER TABLE messages DROP COLUMN staged_turn; PRAGMA user_version=4;").execute(&pool).await.unwrap();
+    sqlx::raw_sql("DROP TABLE work_operations; DROP TABLE decisions; DROP TABLE assignments; DROP TABLE turn_inputs; DROP TABLE turn_leases; DROP TABLE agent_epochs; DROP TABLE run_proposals; ALTER TABLE messages DROP COLUMN staged_turn; PRAGMA user_version=4;").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO turns(id,run_id,agent_id,state,started_at) VALUES('legacy_turn',?,'lead','completed',?)").bind(&run).bind(teams::now()).execute(&pool).await.unwrap();
     sqlx::query(
         "UPDATE runs SET state='completed',result='Historical result bytes',turns=1 WHERE id=?",

@@ -328,6 +328,9 @@ async fn explicit_mcp_profiles_expose_separate_least_privilege_catalogs() {
         agent_names,
         [
             "agent_context_get",
+            "assignment_create",
+            "assignment_update",
+            "decision_request",
             "inbox_read",
             "message_send",
             "result_propose",

@@ -85,6 +85,9 @@ pub struct TeamConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    AssignmentCreate(crate::assignments::CreateArgs),
+    AssignmentUpdate(crate::assignments::UpdateArgs),
+    DecisionRequest(crate::assignments::DecisionArgs),
     Send {
         run_id: String,
         to: AgentId,
@@ -107,6 +110,9 @@ pub enum Action {
 impl Action {
     fn run_id(&self) -> &str {
         match self {
+            Self::AssignmentCreate(args) => &args.run_id,
+            Self::AssignmentUpdate(args) => &args.run_id,
+            Self::DecisionRequest(args) => &args.run_id,
             Self::Send { run_id, .. }
             | Self::Receive { run_id }
             | Self::Commit { run_id, .. }
@@ -384,7 +390,19 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
     if active != 1 {
         bail!("no owned active turn");
     }
+    let lead_id: String = row.get("lead_id");
+    let actor = crate::assignments::Actor {
+        run: &run,
+        agent: agent.as_str(),
+        turn: &turn,
+        lead: &lead_id,
+    };
     let value = match action {
+        Action::AssignmentCreate(args) => crate::assignments::create(&mut tx, &actor, args).await?,
+        Action::AssignmentUpdate(args) => crate::assignments::update(&mut tx, &actor, args).await?,
+        Action::DecisionRequest(args) => {
+            crate::assignments::request_decision(&mut tx, &actor, args).await?
+        }
         Action::Send {
             to,
             body,
@@ -439,6 +457,7 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
                 }
                 json!({"status":if old.get::<Option<String>,_>("staged_turn").is_some(){"staged"}else{"accepted"},"message_id":old.get::<String,_>("id"),"duplicate":true})
             } else {
+                crate::assignments::charge_message(&mut tx, &run, agent.as_str()).await?;
                 let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE run_id=?")
                     .bind(&run)
                     .fetch_one(&mut *tx)
@@ -456,7 +475,8 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
             let rows=sqlx::query("SELECT m.* FROM messages m JOIN turn_inputs i ON i.message_id=m.id WHERE i.turn_id=? ORDER BY m.seq").bind(&turn).fetch_all(&mut *tx).await?;
             sqlx::query("UPDATE turn_leases SET observed_at=COALESCE(observed_at,?) WHERE turn_id=? AND state='active'")
                 .bind(now()).bind(&turn).execute(&mut *tx).await?;
-            json!({"lease_id":turn,"ownership_epoch":lease.get::<i64,_>("epoch"),"messages":rows.iter().map(message_json).collect::<Vec<_>>()})
+            let work = crate::assignments::inbox_context(&mut tx, &actor).await?;
+            json!({"lease_id":turn,"ownership_epoch":lease.get::<i64,_>("epoch"),"messages":rows.iter().map(message_json).collect::<Vec<_>>(),"work":work})
         }
         Action::Commit {
             idempotency_key, ..
@@ -474,6 +494,20 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
             }
             if result.trim().is_empty() || result.len() > 16384 {
                 bail!("invalid result");
+            }
+            // Within this same transaction, staged assignment closures/decisions
+            // participate in completion checks. Any failed gate rolls them back.
+            crate::assignments::publish(&mut tx, &turn).await?;
+            let assignments: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM assignments WHERE run_id=? AND staged_turn IS NULL",
+            )
+            .bind(&run)
+            .fetch_one(&mut *tx)
+            .await?;
+            let unfinished:i64=sqlx::query_scalar("SELECT count(*) FROM assignments WHERE run_id=? AND staged_turn IS NULL AND state NOT IN ('closed','expired','cancelled')").bind(&run).fetch_one(&mut *tx).await?;
+            let decisions:i64=sqlx::query_scalar("SELECT count(*) FROM decisions WHERE run_id=? AND staged_turn IS NULL AND blocking=1 AND state='requested'").bind(&run).fetch_one(&mut *tx).await?;
+            if unfinished > 0 || decisions > 0 {
+                bail!("assignments or human decisions remain pending");
             }
             let pending: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM messages WHERE run_id=? AND delivered_turn IS NULL AND (staged_turn IS NULL OR staged_turn=?) AND id NOT IN (SELECT message_id FROM turn_inputs WHERE turn_id=?)",
@@ -494,7 +528,7 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
             .fetch_one(&mut *tx)
             .await?;
             let missing_reports:i64=sqlx::query_scalar("SELECT count(*) FROM team_members tm JOIN agents a ON a.id=tm.agent_id WHERE a.team_id=? AND a.id!=? AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.run_id=? AND m.sender=a.id AND m.recipient=? AND m.staged_turn IS NULL AND (m.delivered_turn IS NOT NULL OR m.id IN (SELECT message_id FROM turn_inputs WHERE turn_id=?)))").bind(row.get::<String,_>("team_id")).bind(agent.as_str()).bind(&run).bind(agent.as_str()).bind(&turn).fetch_one(&mut *tx).await?;
-            if active > 0 || missing_reports > 0 {
+            if active > 0 || (assignments == 0 && missing_reports > 0) {
                 bail!(
                     "teammates must settle and each report to the lead before completion; end this turn if work is pending"
                 );
@@ -533,6 +567,7 @@ async fn commit_turn(
     if claimed > 0 && observed.is_none() {
         bail!("turn inputs must be read before they can be committed");
     }
+    crate::assignments::publish(tx, turn).await?;
     sqlx::query("UPDATE messages SET delivered_turn=? WHERE id IN (SELECT message_id FROM turn_inputs WHERE turn_id=?) AND delivered_turn IS NULL")
         .bind(turn).bind(turn).execute(&mut **tx).await?;
     sqlx::query("UPDATE messages SET staged_turn=NULL WHERE staged_turn=?")
@@ -611,9 +646,9 @@ async fn record_binding_owned(
 pub async fn next(registry: &Registry) -> Result<Option<Work>> {
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE runs SET state='exhausted',error='run deadline reached' WHERE state IN ('queued','running') AND deadline<=?").bind(now()).execute(&mut *tx).await?;
-    let row=sqlx::query("SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload FROM runs r JOIN messages m ON m.run_id=r.id JOIN team_members tm ON tm.agent_id=m.recipient JOIN agents a ON a.id=tm.agent_id WHERE r.state IN ('queued','running') AND m.delivered_turn IS NULL AND m.staged_turn IS NULL AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running') ORDER BY m.seq LIMIT 1").fetch_optional(&mut *tx).await?;
+    let row=sqlx::query("SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload FROM runs r JOIN messages m ON m.run_id=r.id JOIN team_members tm ON tm.agent_id=m.recipient JOIN agents a ON a.id=tm.agent_id WHERE r.state IN ('queued','running') AND m.delivered_turn IS NULL AND m.staged_turn IS NULL AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.run_id=r.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1) ORDER BY m.seq LIMIT 1").fetch_optional(&mut *tx).await?;
     let Some(row) = row else {
-        sqlx::query("UPDATE runs SET state='stalled',error='no pending messages and lead has not completed' WHERE state='running' AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.run_id=runs.id AND m.delivered_turn IS NULL AND m.staged_turn IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.state='running')").execute(&mut *tx).await?;
+        sqlx::query("UPDATE runs SET state='stalled',error='no pending messages and lead has not completed' WHERE state='running' AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.run_id=runs.id AND m.delivered_turn IS NULL AND m.staged_turn IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.run_id=runs.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1)").execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(None);
     };
@@ -629,6 +664,14 @@ pub async fn next(registry: &Registry) -> Result<Option<Work>> {
         return Ok(None);
     }
     let member: MemberConfig = serde_json::from_str(row.get::<&str, _>("config"))?;
+    if !crate::assignments::charge_turn(&mut tx, &run_id, member.id.as_str()).await? {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let assignment_deadline:Option<i64>=sqlx::query_scalar("SELECT min(deadline) FROM assignments WHERE run_id=? AND assignee=? AND staged_turn IS NULL AND state NOT IN ('closed','expired','cancelled')").bind(&run_id).bind(member.id.as_str()).fetch_one(&mut *tx).await?;
+    let effective_deadline = row
+        .get::<i64, _>("deadline")
+        .min(assignment_deadline.unwrap_or(i64::MAX));
     let native_id:Option<String>=sqlx::query_scalar("SELECT native_id FROM turns WHERE run_id=? AND agent_id=? AND native_id IS NOT NULL ORDER BY rowid DESC LIMIT 1").bind(&run_id).bind(member.id.as_str()).fetch_optional(&mut *tx).await?;
     let turn_id = new_id("turn");
     sqlx::query("INSERT INTO turns(id,run_id,agent_id,state,started_at) VALUES(?,?,?,'running',?)")
@@ -679,7 +722,7 @@ pub async fn next(registry: &Registry) -> Result<Option<Work>> {
         .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO turn_leases(turn_id,principal_id,agent_id,epoch,state,expires_at) VALUES(?,?,?,?,'active',?)")
-        .bind(&turn_id).bind(principal.id.as_str()).bind(member.id.as_str()).bind(epoch).bind(row.get::<i64,_>("deadline").min(now()+row.get::<i64,_>("turn_timeout"))).execute(&mut *tx).await?;
+        .bind(&turn_id).bind(principal.id.as_str()).bind(member.id.as_str()).bind(epoch).bind(effective_deadline.min(now()+row.get::<i64,_>("turn_timeout"))).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO turn_inputs(turn_id,message_id) SELECT ?,id FROM messages WHERE run_id=? AND recipient=? AND delivered_turn IS NULL AND staged_turn IS NULL")
         .bind(&turn_id).bind(&run_id).bind(member.id.as_str()).execute(&mut *tx).await?;
     let observer_file = PathBuf::from(row.get::<String, _>("credential_file"));
@@ -707,7 +750,7 @@ pub async fn next(registry: &Registry) -> Result<Option<Work>> {
         agent: member,
         credential_file,
         native_id,
-        deadline: row.get("deadline"),
+        deadline: effective_deadline,
         turn_timeout: row.get::<i64, _>("turn_timeout") as u64,
         team_id: row.get("team_id"),
     };
