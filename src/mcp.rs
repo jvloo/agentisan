@@ -336,6 +336,7 @@ impl AgentServer {
         let mut tool_router = Self::tool_router();
         if !can_propose {
             tool_router.disable_route("result_propose");
+            tool_router.disable_route("assignment_create");
         }
         Self {
             client,
@@ -371,9 +372,16 @@ impl AgentServer {
             Ok(value) if value["status"] == "bound" => value,
             _ => return Ok(rejected()),
         };
-        let mut capabilities = vec!["inbox_read", "message_send", "turn_commit"];
+        let mut capabilities = vec![
+            "inbox_read",
+            "message_send",
+            "turn_commit",
+            "assignment_update",
+            "decision_request",
+        ];
         if self.can_propose {
             capabilities.push("result_propose");
+            capabilities.push("assignment_create");
         }
         Ok(success(serde_json::json!({
             "protocol": "agentisan-agent-v1",
@@ -490,6 +498,57 @@ impl AgentServer {
         })
         .await
     }
+
+    #[tool(
+        description = "Lead only: stage a bounded assignment to an exact teammate. Budgets reserve a slice of the remaining root limits; publish with turn_commit.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn assignment_create(
+        &self,
+        Parameters(args): Parameters<crate::assignments::CreateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.action(crate::teams::Action::AssignmentCreate(args))
+            .await
+    }
+
+    #[tool(
+        description = "Stage an assignment transition. Assignees can accept, start or report; only the lead closes or cancels. Published atomically by turn_commit.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn assignment_update(
+        &self,
+        Parameters(args): Parameters<crate::assignments::UpdateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.action(crate::teams::Action::AssignmentUpdate(args))
+            .await
+    }
+
+    #[tool(
+        description = "Stage a human decision request for an immutable scope and artifact revision. This never grants approval. Publish with turn_commit; only a trusted administrator can resolve it.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn decision_request(
+        &self,
+        Parameters(args): Parameters<crate::assignments::DecisionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.action(crate::teams::Action::DecisionRequest(args))
+            .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -542,7 +601,9 @@ mod tests {
         let lead = AgentServer::new(client, true);
         assert!(!worker.tool_router.has_route("result_propose"));
         assert!(lead.tool_router.has_route("result_propose"));
-        assert_eq!(worker.tool_router.list_all().len(), 4);
-        assert_eq!(lead.tool_router.list_all().len(), 5);
+        assert!(!worker.tool_router.has_route("assignment_create"));
+        assert!(!lead.tool_router.has_route("decision_resolve"));
+        assert_eq!(worker.tool_router.list_all().len(), 6);
+        assert_eq!(lead.tool_router.list_all().len(), 8);
     }
 }
