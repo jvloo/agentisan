@@ -19,7 +19,7 @@ struct Cli {
     data_dir: PathBuf,
     #[arg(long, global = true, default_value = "http://127.0.0.1:7437")]
     endpoint: String,
-    /// File containing an explicitly provisioned fixture credential. Never a native session ID.
+    /// File containing an explicitly provisioned Agentisan credential. Never a native session ID.
     #[arg(long, global = true)]
     credential_file: Option<PathBuf>,
     #[command(subcommand)]

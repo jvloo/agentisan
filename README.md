@@ -19,7 +19,7 @@ configuration. The fixture walkthrough below exercises inspection without model 
 ## What works
 
 - Import explicit fake-adapter fixtures containing groups, teams, agents, and scoped readers.
-- Inspect the same records through CLI commands and five read-only MCP tools.
+- Inspect the same records through CLI commands and read-only MCP tools.
 - Keep canonical agent IDs distinct from native session, thread, and subagent IDs.
 - Preserve records and credential bindings across service restarts.
 - Reject conflicting registrations; repeating an identical fixture is idempotent.
