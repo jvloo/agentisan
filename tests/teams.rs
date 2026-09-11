@@ -63,13 +63,27 @@ async fn send(registry: &Registry, token: &str, run: &str, to: &str, key: &str) 
     .unwrap()
 }
 
+async fn commit(registry: &Registry, work: &teams::Work) -> Value {
+    teams::act(
+        registry,
+        &fixture::read_credential(&work.credential_file).unwrap(),
+        Action::Commit {
+            run_id: work.run_id.clone(),
+            idempotency_key: "commit".into(),
+        },
+    )
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn message_identity_deduplication_delivery_and_peer_scope_are_persistent() {
-    let (_temp, r, t) = setup().await;
+    let (_temp, r, mut t) = setup().await;
     let run = teams::start(&r, "team", "Assign independent tasks", 12, 12, 120, 20)
         .await
         .unwrap();
     let lead = teams::next(&r).await.unwrap().unwrap();
+    t[0] = fixture::read_credential(&lead.credential_file).unwrap();
     assert_eq!(lead.agent.id.as_str(), "lead");
     assert!(
         teams::act(
@@ -124,6 +138,7 @@ async fn message_identity_deduplication_delivery_and_peer_scope_are_persistent()
         .await
         .is_err()
     );
+    commit(&r, &lead).await;
     // Finish a simulated native turn; no provider process is invoked in this test.
     teams::finish(
         &r,
@@ -138,6 +153,7 @@ async fn message_identity_deduplication_delivery_and_peer_scope_are_persistent()
     .await
     .unwrap();
     let a = teams::next(&r).await.unwrap().unwrap();
+    t[1] = fixture::read_credential(&a.credential_file).unwrap();
     assert_eq!(a.agent.id.as_str(), "a");
     teams::act(
         &r,
@@ -161,6 +177,7 @@ async fn message_identity_deduplication_delivery_and_peer_scope_are_persistent()
         .await
         .is_err()
     );
+    commit(&r, &a).await;
     let history = teams::messages(&r, &t[0], &run).await.unwrap();
     let list = history["messages"].as_array().unwrap();
     assert_eq!(list.len(), 4);
@@ -172,7 +189,7 @@ async fn message_identity_deduplication_delivery_and_peer_scope_are_persistent()
 
 #[tokio::test]
 async fn run_limits_and_interrupted_turns_stop_without_replay() {
-    let (_temp, r, t) = setup().await;
+    let (_temp, r, mut t) = setup().await;
     let run = teams::start(&r, "team", "Work", 1, 2, 120, 20)
         .await
         .unwrap();
@@ -182,6 +199,7 @@ async fn run_limits_and_interrupted_turns_stop_without_replay() {
             .is_err()
     );
     let work = teams::next(&r).await.unwrap().unwrap();
+    t[0] = fixture::read_credential(&work.credential_file).unwrap();
     teams::act(
         &r,
         &t[0],
@@ -207,6 +225,7 @@ async fn run_limits_and_interrupted_turns_stop_without_replay() {
         .await
         .is_err()
     );
+    commit(&r, &work).await;
     teams::finish(
         &r,
         &work,
@@ -331,14 +350,15 @@ async fn inspected_resume_preserves_native_ids_and_original_limits() {
 
 #[tokio::test]
 async fn concurrent_sends_cannot_spend_the_same_message_allowance() {
-    let (temp, r, t) = setup().await;
+    let (temp, r, mut t) = setup().await;
     let other = Registry::open(&temp.path().join("state/registry.sqlite3"))
         .await
         .unwrap();
     let run = teams::start(&r, "team", "Work", 4, 2, 120, 20)
         .await
         .unwrap();
-    teams::next(&r).await.unwrap().unwrap();
+    let work = teams::next(&r).await.unwrap().unwrap();
+    t[0] = fixture::read_credential(&work.credential_file).unwrap();
     teams::act(
         &r,
         &t[0],
@@ -364,6 +384,7 @@ async fn concurrent_sends_cannot_spend_the_same_message_allowance() {
     };
     let (a, b) = tokio::join!(teams::act(&r, &t[0], one), teams::act(&other, &t[0], two));
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    commit(&r, &work).await;
     assert_eq!(
         teams::messages(&r, &t[0], &run).await.unwrap()["messages"]
             .as_array()
@@ -377,7 +398,7 @@ async fn concurrent_sends_cannot_spend_the_same_message_allowance() {
 
 #[tokio::test]
 async fn completion_requires_worker_reports_and_recipients_must_be_managed() {
-    let (_temp, r, t) = setup().await;
+    let (_temp, r, mut t) = setup().await;
     let ghost = Fixture {
         schema_version: 1,
         groups: vec![Group {
@@ -410,7 +431,8 @@ async fn completion_requires_worker_reports_and_recipients_must_be_managed() {
     let run = teams::start(&r, "team", "Work", 4, 8, 120, 20)
         .await
         .unwrap();
-    teams::next(&r).await.unwrap().unwrap();
+    let work = teams::next(&r).await.unwrap().unwrap();
+    t[0] = fixture::read_credential(&work.credential_file).unwrap();
     teams::act(
         &r,
         &t[0],
@@ -489,5 +511,339 @@ async fn resuming_an_older_run_never_borrows_a_newer_runs_native_session() {
     teams::record_binding(&r, &history[0].0, "lead", &history[0].1)
         .await
         .unwrap();
+    r.close().await;
+}
+
+fn native_success() -> agentisan::worker::TurnResult {
+    agentisan::worker::TurnResult {
+        native_id: uuid::Uuid::new_v4().to_string(),
+        output: "Finished native invocation".into(),
+        usage: serde_json::json!(null),
+        artifacts: std::path::PathBuf::new(),
+    }
+}
+
+#[tokio::test]
+async fn lost_read_response_does_not_acknowledge_and_commit_publishes_atomically() {
+    let (_temp, r, observers) = setup().await;
+    let run = teams::start(&r, "team", "Review", 8, 16, 120, 20)
+        .await
+        .unwrap();
+    let work = teams::next(&r).await.unwrap().unwrap();
+    let token = fixture::read_credential(&work.credential_file).unwrap();
+    let read = Action::Receive {
+        run_id: run.clone(),
+    };
+    assert!(teams::act(&r, &observers[0], read.clone()).await.is_err());
+    let first = teams::act(&r, &token, read.clone()).await.unwrap();
+    let repeated = teams::act(&r, &token, read).await.unwrap();
+    assert_eq!(
+        first, repeated,
+        "lost transport responses are safely readable again"
+    );
+    assert_eq!(first["ownership_epoch"], 1);
+    assert_eq!(
+        teams::inspect_run(&r, &observers[0], &run).await.unwrap()["pending_message_count"],
+        1
+    );
+    let staged = send(&r, &token, &run, "a", "assignment").await;
+    assert_eq!(staged["status"], "staged");
+    assert_eq!(
+        teams::messages(&r, &observers[0], &run).await.unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let receipt = commit(&r, &work).await;
+    assert_eq!(
+        receipt,
+        commit(&r, &work).await,
+        "duplicate commit returns its exact durable receipt"
+    );
+    let messages = teams::messages(&r, &observers[0], &run).await.unwrap();
+    assert_eq!(messages["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(messages["messages"][0]["delivered_turn"], work.turn_id);
+    assert!(
+        teams::act(
+            &r,
+            &token,
+            Action::Send {
+                run_id: run.clone(),
+                to: "b".into(),
+                body: "late".into(),
+                reply_to: None,
+                idempotency_key: "late".into(),
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        teams::act(
+            &r,
+            &token,
+            Action::Commit {
+                run_id: run.clone(),
+                idempotency_key: "changed".into()
+            }
+        )
+        .await
+        .is_err()
+    );
+    teams::finish(&r, &work, Ok(native_success()))
+        .await
+        .unwrap();
+    assert_eq!(
+        teams::next(&r).await.unwrap().unwrap().agent.id.as_str(),
+        "a"
+    );
+    r.close().await;
+}
+
+#[tokio::test]
+async fn successful_native_exit_without_commit_keeps_inputs_and_fences_old_lease() {
+    let (_temp, r, observers) = setup().await;
+    let run = teams::start(&r, "team", "Review", 8, 16, 120, 20)
+        .await
+        .unwrap();
+    let first = teams::next(&r).await.unwrap().unwrap();
+    let old = fixture::read_credential(&first.credential_file).unwrap();
+    let read = Action::Receive {
+        run_id: run.clone(),
+    };
+    let inbox = teams::act(&r, &old, read.clone()).await.unwrap();
+    teams::finish(&r, &first, Ok(native_success()))
+        .await
+        .unwrap();
+    assert_eq!(
+        teams::inspect_run(&r, &observers[0], &run).await.unwrap()["pending_message_count"],
+        1
+    );
+    assert!(
+        teams::act(
+            &r,
+            &old,
+            Action::Commit {
+                run_id: run.clone(),
+                idempotency_key: "late".into()
+            }
+        )
+        .await
+        .is_err()
+    );
+    teams::resume(&r, &run).await.unwrap();
+    let second = teams::next(&r).await.unwrap().unwrap();
+    let new = fixture::read_credential(&second.credential_file).unwrap();
+    assert_ne!(old, new);
+    let next_inbox = teams::act(&r, &new, read.clone()).await.unwrap();
+    assert_eq!(next_inbox["ownership_epoch"], 2);
+    assert_eq!(next_inbox["messages"], inbox["messages"]);
+    assert!(teams::act(&r, &old, read).await.is_err());
+    assert!(
+        teams::record_work_binding(&r, &first, &uuid::Uuid::new_v4().to_string())
+            .await
+            .is_err()
+    );
+    assert!(
+        teams::finish(&r, &first, Ok(native_success()))
+            .await
+            .is_err()
+    );
+    r.close().await;
+}
+
+#[tokio::test]
+async fn native_failure_never_publishes_uncommitted_outbox_or_consumes_input() {
+    let (_temp, r, observers) = setup().await;
+    let run = teams::start(&r, "team", "Review", 8, 16, 120, 20)
+        .await
+        .unwrap();
+    let work = teams::next(&r).await.unwrap().unwrap();
+    let token = fixture::read_credential(&work.credential_file).unwrap();
+    teams::act(
+        &r,
+        &token,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    send(&r, &token, &run, "a", "uncommitted").await;
+    teams::finish(
+        &r,
+        &work,
+        Err(anyhow::anyhow!("transport lost after staging")),
+    )
+    .await
+    .unwrap();
+    let state = teams::inspect_run(&r, &observers[0], &run).await.unwrap();
+    assert_eq!(state["state"], "failed");
+    assert_eq!(state["message_count"], 1);
+    assert_eq!(state["pending_message_count"], 1);
+    assert!(teams::resume(&r, &run).await.is_err());
+    assert!(teams::next(&r).await.unwrap().is_none());
+    r.close().await;
+}
+
+#[tokio::test]
+async fn committed_proposal_survives_native_failure_and_service_restart() {
+    for crash in [false, true] {
+        let (_temp, r, observers) = setup().await;
+        let run = teams::start(&r, "team", "Review", 8, 16, 120, 20)
+            .await
+            .unwrap();
+        let lead = teams::next(&r).await.unwrap().unwrap();
+        let token = fixture::read_credential(&lead.credential_file).unwrap();
+        send(&r, &token, &run, "a", "assign_a").await;
+        send(&r, &token, &run, "b", "assign_b").await;
+        commit(&r, &lead).await;
+        teams::finish(&r, &lead, Ok(native_success()))
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let worker = teams::next(&r).await.unwrap().unwrap();
+            let token = fixture::read_credential(&worker.credential_file).unwrap();
+            send(&r, &token, &run, "lead", "report").await;
+            commit(&r, &worker).await;
+            teams::finish(&r, &worker, Ok(native_success()))
+                .await
+                .unwrap();
+        }
+        let lead = teams::next(&r).await.unwrap().unwrap();
+        let token = fixture::read_credential(&lead.credential_file).unwrap();
+        let action = Action::Complete {
+            run_id: run.clone(),
+            result: "Exact durable proposed bytes\n".into(),
+        };
+        let receipt = teams::act(&r, &token, action.clone()).await.unwrap();
+        assert_eq!(
+            receipt,
+            teams::act(&r, &token, action.clone()).await.unwrap()
+        );
+        if crash {
+            teams::recover_interrupted(&r).await.unwrap();
+        } else {
+            teams::finish(
+                &r,
+                &lead,
+                Err(anyhow::anyhow!("native process failed after proposal")),
+            )
+            .await
+            .unwrap();
+        }
+        let state = teams::inspect_run(&r, &observers[0], &run).await.unwrap();
+        assert_eq!(state["state"], if crash { "interrupted" } else { "failed" });
+        assert_eq!(
+            state["proposal"]["result"],
+            "Exact durable proposed bytes\n"
+        );
+        assert_eq!(state["result"], state["proposal"]["result"]);
+        assert_eq!(state["pending_message_count"], 0);
+        assert_eq!(state["acceptance"], "not_independently_verified");
+        assert!(teams::next(&r).await.unwrap().is_none());
+        if crash {
+            assert!(teams::act(&r, &token, action).await.is_err());
+        }
+        r.close().await;
+    }
+}
+
+#[tokio::test]
+async fn migration_preserves_v4_records_and_old_tokens_are_read_only() {
+    let (temp, r, observers) = setup().await;
+    let run = teams::start(&r, "team", "Legacy objective", 8, 16, 120, 20)
+        .await
+        .unwrap();
+    let path = temp.path().join("state/registry.sqlite3");
+    r.close().await;
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::raw_sql("DROP TABLE turn_inputs; DROP TABLE turn_leases; DROP TABLE agent_epochs; DROP TABLE run_proposals; ALTER TABLE messages DROP COLUMN staged_turn; PRAGMA user_version=4;").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,run_id,agent_id,state,started_at) VALUES('legacy_turn',?,'lead','completed',?)").bind(&run).bind(teams::now()).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE runs SET state='completed',result='Historical result bytes',turns=1 WHERE id=?",
+    )
+    .bind(&run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE messages SET delivered_turn='legacy_turn' WHERE run_id=?")
+        .bind(&run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let upgraded = Registry::open(&path).await.unwrap();
+    assert_eq!(
+        teams::inspect_run(&upgraded, &observers[0], &run)
+            .await
+            .unwrap()["message_count"],
+        1
+    );
+    let old_state = teams::inspect_run(&upgraded, &observers[0], &run)
+        .await
+        .unwrap();
+    assert_eq!(old_state["proposal"]["result"], "Historical result bytes");
+    assert_eq!(old_state["proposal"]["turn_id"], "legacy_turn");
+    assert_eq!(old_state["pending_message_count"], 0);
+    let run = teams::start(&upgraded, "team", "New objective", 8, 16, 120, 20)
+        .await
+        .unwrap();
+    let work = teams::next(&upgraded).await.unwrap().unwrap();
+    assert!(
+        teams::act(
+            &upgraded,
+            &observers[0],
+            Action::Commit {
+                run_id: run.clone(),
+                idempotency_key: "old_authority".into()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(commit(&upgraded, &work).await["status"], "committed");
+    upgraded.close().await;
+}
+
+#[tokio::test]
+async fn expired_lease_cannot_publish_or_acknowledge_work() {
+    let (temp, r, observers) = setup().await;
+    let run = teams::start(&r, "team", "Work", 8, 16, 120, 20)
+        .await
+        .unwrap();
+    let work = teams::next(&r).await.unwrap().unwrap();
+    let token = fixture::read_credential(&work.credential_file).unwrap();
+    send(&r, &token, &run, "a", "staged").await;
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        temp.path().join("state/registry.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("UPDATE turn_leases SET expires_at=0 WHERE turn_id=?")
+        .bind(&work.turn_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    assert!(
+        teams::act(
+            &r,
+            &token,
+            Action::Commit {
+                run_id: run.clone(),
+                idempotency_key: "expired".into()
+            }
+        )
+        .await
+        .is_err()
+    );
+    let state = teams::inspect_run(&r, &observers[0], &run).await.unwrap();
+    assert_eq!(state["message_count"], 1);
+    assert_eq!(state["pending_message_count"], 1);
     r.close().await;
 }
