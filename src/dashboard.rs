@@ -271,23 +271,35 @@ pub async fn run(data_dir: &Path, preferred_run: Option<&str>) -> Result<()> {
         bail!("the dashboard requires an interactive terminal; use agentisan --help for commands");
     }
     let mut app = App::new(data_dir, preferred_run).await?;
-    let mut terminal = ratatui::try_init().context("cannot initialize terminal dashboard")?;
-    if let Err(error) = execute!(std::io::stdout(), EnableMouseCapture) {
+    let result = loop {
+        let mut terminal = match ratatui::try_init().context("cannot initialize terminal dashboard")
+        {
+            Ok(terminal) => terminal,
+            Err(error) => break Err(error),
+        };
+        if let Err(error) = execute!(std::io::stdout(), EnableMouseCapture) {
+            ratatui::restore();
+            break Err(error.into());
+        }
+        let mouse = MouseCapture;
+        let screen = run_loop(&mut terminal, &mut app).await;
+        drop(mouse);
         ratatui::restore();
-        return Err(error.into());
-    }
-    let mouse = MouseCapture;
-    let result = run_loop(&mut terminal, &mut app).await;
-    drop(mouse);
-    ratatui::restore();
+        if let Err(error) = screen {
+            break Err(error);
+        }
+        let Some((run_id, agent_id)) = app.open_requested.take() else {
+            break Ok(());
+        };
+        if let Err(error) = open_native(data_dir, &run_id, &agent_id, OpenTarget::Cli).await {
+            app.last_error = Some(error.to_string());
+        }
+        app.refresh().await;
+    };
     if let Some(registry) = app.registry.clone() {
         registry.close().await;
     }
-    result?;
-    if let Some((run_id, agent_id)) = app.open_requested {
-        open_native(data_dir, &run_id, &agent_id, OpenTarget::Cli).await?;
-    }
-    Ok(())
+    result
 }
 
 async fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {

@@ -55,8 +55,8 @@ Open the live terminal dashboard in another iTerm2 or terminal window:
 
 Up/Down switches runs, clicking an agent or pressing Tab filters its message routes, and `o` opens
 the selected agent's exact native CLI session only after Agentisan has released the run. The
-dashboard reads authoritative local state directly and does not require a browser or another model
-call.
+dashboard returns automatically when that native chat exits. It reads authoritative local state
+directly and does not require a browser or another model call.
 
 Creating an existing managed team fails rather than silently replacing profiles or credentials.
 New objectives on a team get fresh native sessions; old native IDs remain in the turn history.

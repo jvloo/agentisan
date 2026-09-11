@@ -91,7 +91,8 @@ Agentisan resumes the exact recorded Claude Code or Codex CLI session. It refuse
 queued, active, stalled, or interrupted, preventing a competing writer. Codex Desktop does not yet
 publish an external exact-thread opening contract. Claude CLI sessions can be transferred with
 `/desktop` when appropriate, but Claude Desktop maintains separate history. The `open` command
-reports these capability limits instead of guessing.
+reports these capability limits instead of guessing. When a chat opened with `o` exits, Agentisan
+restores the same dashboard and refreshes it automatically.
 
 All existing subcommands remain available for scripts, CI, MCP hosts, and detailed administration.
 
