@@ -1,59 +1,67 @@
 # Agentisan
 
-**Agent teams. Your tools. Your control.**
+**Agent teams, with receipts.**
 
-Agentisan is a local toolkit for making groups of agent teams identifiable and inspectable
-from existing CLI and Desktop clients. Its longer-term goal is bounded collaboration across
-providers, with persistent work records and explicit human decision boundaries.
+Agentisan is a local Rust runtime and MCP server for durable, bounded collaboration between
+Claude Code and Codex CLI agents. One service-owned lead delegates to multiple workers; workers can
+exchange scoped messages directly; Agentisan persists identity, assignments, turn commits, human
+decisions, recovery state, and result verification in SQLite.
 
-**Current status: reusable native CLI teams (core-v2).** The Rust service can run a Claude lead with
-Codex workers and the reverse, with real peer-to-peer MCP messages and persistent native
-session IDs. Live execution currently supports macOS/Linux and consultation profiles;
-shell/file-editing tools are disabled. First-class assignments, scoped human decision records,
-and inspected no-effect reconciliation are available; native approval UI adapters, general effect
-reconciliation, direct model-API workers, and native deep-link opening remain planned.
+**Current implementation: core-v2.** It runs real Claude-led/Codex-worker teams and the reverse on
+macOS/Linux. Existing CLIs retain their native sessions, Agentisan's CLI and observer MCP profile
+inspect authoritative runtime state, and completed Codex sessions remain readable in Codex
+Desktop. The current worker profile supports consultation, planning, and review; it deliberately
+disables shell commands, file editing, native delegation, external apps, and unrelated MCP tools.
 
 Start with the [live-team guide](docs/live-teams.md) and either the
 [Claude-led](examples/claude-led-team.json) or [Codex-led](examples/codex-led-team.json)
 configuration. The fixture walkthrough below exercises inspection without model calls.
 
-## What works
+## Shipped in core-v2
 
-- Import explicit fake-adapter fixtures containing groups, teams, agents, and scoped readers.
-- Inspect the same records through CLI commands and read-only MCP tools.
-- Keep canonical agent IDs distinct from native session, thread, and subagent IDs.
-- Preserve records and credential bindings across service restarts.
-- Reject conflicting registrations; repeating an identical fixture is idempotent.
-- Restrict inspection to the groups granted to the connector's credential.
-- Return `unbound` when no credential or no simulated agent binding is present.
-- Register reusable managed teams, submit objectives, and inspect persistent run/message history.
-- Deliver real messages through MCP between the lead and workers and directly between workers.
-- Bound CLI invocations, message count, elapsed time, and output; stop stalled work.
-- Preserve exact native sessions between turns, with explicit resume of inspected unread work.
-- Stream authoritative run snapshots with a bounded, read-only CLI watch command.
-- Issue short-lived per-turn lease credentials fenced by agent ownership epochs.
-- Separate agent and observer MCP profiles; observer credentials are read-only.
-- Read a stable message, assignment, and decision snapshot without acknowledgement; stage sends
-  and publish them with an atomic `turn_commit` (a successful lead proposal commits its inputs atomically).
-- Persist result proposals independently of native turn success so they can be verified after
-  a process failure or service restart.
-- Fail closed when the worker scheduler is unhealthy and recover abandoned verifier reservations.
-- Run an administrator-selected deterministic verifier against the exact proposed result and
-  persist an accepted, rejected, or error receipt with result and verifier hashes.
-- Create bounded assignments with reserved turn/message slices and explicit lifecycle states.
-- Skip recipients whose assignment slice is exhausted so independent work can continue; a trusted
-  local administrator can extend a stalled assignment only within the run's original root limits.
-- Persist scoped human decision requests; only the trusted local CLI can inspect, resolve, or
-  invalidate them, and a blocking decision pauses only its dependent assignment.
-- Reconcile an interrupted turn as producing no effect after explicit inspection, then resume it
-  under a fresh lease without silently replaying uncertain work.
+| Capability | Current behavior |
+|---|---|
+| Cross-provider teams | A Claude lead can coordinate Codex workers, or a Codex lead can coordinate Claude workers. Workers can message each other through MCP. |
+| Durable turns | Short-lived credentials bind every mutation to one agent, run, turn, and ownership epoch. The first inbox read persists a stable snapshot; `turn_commit` atomically acknowledges inputs and publishes staged work. |
+| Bounded delegation | Assignments reserve turn and message slices inside immutable run limits. Exhausted assignments do not starve independent work, and inspected extensions cannot enlarge the root budget. |
+| Human decisions | Agents can request a choice against exact scope and artifact hashes. Only the trusted local CLI can resolve or invalidate it; a blocking request pauses its dependent assignment. |
+| Recovery | Restarted in-flight work becomes explicit `unknown` state. No-effect reconciliation discards uncommitted staging, preserves already-committed effects, and requires an inspected resume. |
+| Inspection and acceptance | CLI and observer MCP expose credential-scoped state. Result proposals survive native failure and remain separate from deterministic verification and human acceptance. |
 
-Fixture bindings remain simulated. Managed bindings record IDs returned by configured native
-CLIs. `bound` identifies the provisioned credential; it does not independently authenticate
-the enclosing chat or prove that every caller holding that credential is the native process.
-Fixture activity remains unobserved; managed turn activity is tracked separately.
+The latest live acceptance used Claude Sonnet and Codex Luna at low effort in both lead directions.
+Each topology completed five native turns, two assignments, eleven persistent messages, all six
+required lead/worker/peer routes, and three distinct durable native sessions. See the
+[sanitized validation report](validation/live-teams.md).
 
-## Build and try the fixture registry
+## Claims Agentisan does not make
+
+- It does not guarantee exactly-once behavior for arbitrary external side effects.
+- Run, turn, and assignment limits are not provider token or billing caps.
+- Current managed workers cannot execute shell commands or edit project files.
+- Codex Desktop is a verified transcript inspection surface, not an authenticated active-writer
+  adapter; Claude Desktop integration is not shipped.
+- Direct model APIs, Windows CLI supervision, native approval UI, URI/deep-link handlers,
+  concurrent native turns, and general effect reconciliation are not shipped.
+
+## Run a real team
+
+Build Agentisan, then choose the [Claude-led](examples/claude-led-team.json) or
+[Codex-led](examples/codex-led-team.json) template:
+
+```sh
+cargo build --locked
+```
+
+The [live-team guide](docs/live-teams.md#create-and-run-a-team) is the canonical runbook for
+private configuration, account authentication, `--live` authorization, bounded submission,
+inspection, model selection, and recovery.
+
+## Try inspection without model calls
+
+Fixture bindings are simulated. Managed bindings record IDs returned by configured native CLIs.
+`bound` identifies the provisioned credential; it does not independently authenticate the
+enclosing chat or prove that every caller holding that credential is the native process. Fixture
+activity remains unobserved; managed turn activity is tracked separately.
 
 Install Rust through [rustup](https://rust-lang.org/tools/install/). The repository pins the
 toolchain in [rust-toolchain.toml](rust-toolchain.toml); dependencies are locked. Build from
@@ -139,6 +147,23 @@ The verifier executable is trusted local code. The receipt records hashes of the
 proposed result. A malformed, failed, oversized, or timed-out verifier is recorded as `error` and
 does not become acceptance; an accepted or rejected receipt is terminal for that run.
 
+Trusted local recovery and human-decision commands stay outside model-facing MCP:
+
+```sh
+./target/debug/agentisan assignments inspect ASSIGNMENT_ID
+./target/debug/agentisan assignments extend ASSIGNMENT_ID \
+  --add-turns 1 --deadline-seconds 120 --after-inspection
+./target/debug/agentisan decisions inspect DECISION_ID
+./target/debug/agentisan decisions resolve DECISION_ID \
+  --scope-hash SHA256 --artifact-hash SHA256 --choice approve
+./target/debug/agentisan runs reconcile TURN_ID --no-effect --after-inspection
+./target/debug/agentisan runs resume RUN_ID --after-inspection
+```
+
+Assignment extension reallocates capacity inside the original run limits. No-effect reconciliation
+requires inspecting the native evidence first; it preserves effects already published by a committed
+turn and discards only private staging from an uncommitted turn.
+
 The MCP connector queries the separate service. Closing the connector leaves the service
 and its records available. Closing the service requires restarting it before inspection can
 continue. No browser UI is required, and no URI handler is installed.
@@ -166,9 +191,12 @@ the service through a proxy or tunnel. See the [Milestone 1 contract](docs/miles
 
 - [Architecture](docs/architecture.md): the intended team runtime and its boundaries.
 - [Rust decision](docs/decisions/0001-rust-core.md): stack choice and deferred decisions.
+- [Durable protocol decision](docs/decisions/0002-durable-agent-protocol.md): leases, atomic
+  publication, recovery, and trust boundaries.
 - [Live teams](docs/live-teams.md): real execution, inspection, limits, and validation.
 - [Desktop inspection validation](validation/desktop-inspection.md): active-run readback and
   deterministic rejection of a flawed agent-produced bundle.
 - [Roadmap](ROADMAP.md): remaining milestones and acceptance criteria.
+- [Changelog](CHANGELOG.md): shipped core-v2 behavior.
 - [Agent contribution instructions](AGENTS.md).
 - [MIT license](LICENSE).

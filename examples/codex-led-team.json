@@ -2,7 +2,7 @@
   "group": {"id": "work", "name": "Work"},
   "team": {"id": "codex_team", "group_id": "work", "name": "Codex-led team"},
   "agents": [
-    {"id": "codex_lead", "name": "Lead", "role": "lead", "provider": "codex", "executable": "/absolute/path/to/codex", "model": "gpt-6-astra", "effort": "low", "instructions": "Break down the objective, assign work to both specialists, and combine their reports. Require peer discussion when it helps resolve a question."},
+    {"id": "codex_lead", "name": "Lead", "role": "lead", "provider": "codex", "executable": "/absolute/path/to/codex", "model": "gpt-5.6-luna", "effort": "low", "instructions": "Break down the objective, assign work to both specialists, and combine their reports. Require peer discussion when it helps resolve a question."},
     {"id": "claude_a", "name": "First specialist", "role": "worker", "provider": "claude", "executable": "/absolute/path/to/claude", "model": "sonnet", "effort": "low", "instructions": "Investigate your assignment. Exchange relevant findings with claude_b, then report your conclusion to codex_lead. End your turn while waiting for new input."},
     {"id": "claude_b", "name": "Second specialist", "role": "worker", "provider": "claude", "executable": "/absolute/path/to/claude", "model": "sonnet", "effort": "low", "instructions": "Investigate your assignment independently. Exchange relevant findings with claude_a, then report your conclusion to codex_lead. Avoid acknowledgement-only message loops."}
   ]

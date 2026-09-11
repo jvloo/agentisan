@@ -1,6 +1,10 @@
 # Roadmap
 
-Milestones 0 and 1 are implemented. Real CLI team execution and messaging now cover parts of later milestones, as marked below. See [docs/architecture.md](docs/architecture.md) for the broader design and [docs/live-teams.md](docs/live-teams.md) for current behavior and limits.
+Milestones 0 and 1 are implemented. Core-v2 also ships substantial parts of milestones 2–5,
+including service-owned cross-provider coordination, durable turn commits, assignments, scoped
+decisions, inspected recovery, and deterministic result verification. See
+[docs/architecture.md](docs/architecture.md) for the broader design and
+[docs/live-teams.md](docs/live-teams.md) for current behavior and limits.
 
 ## Milestone 0 — Design bootstrap
 
@@ -28,8 +32,8 @@ Acceptance:
 interrupted-state recording, narrow inspected resume, deterministic exact-result verification
 receipts, durable proposals, lease fencing, and verifier reservation recovery are implemented.
 First-class assignment records, scoped decision requests and local administrator resolution, plus
-inspected no-effect reconciliation and bounded assignment recovery are implemented. Native
-human-authentication adapters and other effect outcomes remain open.
+stable full-input snapshots, committed/uncommitted no-effect reconciliation, and bounded assignment
+recovery are implemented. Native human-authentication adapters and other effect outcomes remain open.
 
 Goal: one bounded worker job can complete, recover, or report uncertain effects after a crash, and a human decision can gate it.
 
@@ -57,7 +61,7 @@ Acceptance:
 and worker/worker MCP exchanges in both provider directions. CLI/MCP inspection, bounded live
 watching, authoritative runtime activity, exact native IDs, lease-fenced turns, role-scoped MCP
 profiles, stable inbox reads, atomic commits, and separate result verification work. Client-owned
-lead binding, Desktop connectors, native deep-link opening, and concurrent native turns remain open.
+lead binding, Desktop writer connectors, native deep-link opening, and concurrent native turns remain open.
 
 Goal: a main agent driven from an existing CLI/Desktop client can delegate to multiple workers that exchange bounded peer messages, with native links back into supported clients.
 
@@ -66,16 +70,19 @@ Acceptance:
 - CLI and MCP inspection work without a separate browser UI. Where an installed URI handler and native adapter support it, an `agentisan://agents/<agent-id>` link opens the verified native session for inspection. Opening a link does not resume execution, send a message, or approve work; unsupported native links are explicitly reported.
 - Tests demonstrate: stale-ownership rejection when a second main agent attempts to claim an already-owned objective.
 
-## Milestone 5 — Multi-team policy and service-owned coordinator (later)
+## Milestone 5 — Multi-team policy and ownership transfer (later)
 
 **Status: partial.** The managed CLI scheduler already owns coordinator turns and fails closed on
-scheduler health failure. First-class assignment and decision records now exist. Cross-team policies
-beyond current group grants, provider token/cost reservations, advanced ownership transfer, and
-dynamic delegation remain open.
+scheduler health failure, and coordination continues after the submitting client disconnects while
+the service host remains available. First-class assignment and decision records also exist.
+Cross-team policies beyond current group grants, provider token/cost reservations, explicit
+ownership transfer, and dynamic delegation remain open.
 
-Goal: support policy scoped across multiple teams in a group, and an optional service-hosted coordinator that can continue independently while its host is available.
+Goal: enforce policy across multiple teams and support explicit transfer between service-owned and
+future client-owned coordinators without allowing competing owners.
 
 Acceptance:
 - Group-level policy (e.g., budget or permission limits) is enforced consistently across more than one team without requiring an always-connected client.
-- A service-owned coordinator can resume driving an objective after the originating client disconnects, under explicit ownership transfer, with stale-owner rejection still enforced.
+- A future client-owned coordinator can transfer an objective to or from the existing service-owned
+  coordinator, with stale-owner rejection enforced throughout.
 - Remaining scope stays exploratory and must be justified by findings from the implemented paths.

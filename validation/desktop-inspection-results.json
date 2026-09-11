@@ -1,5 +1,6 @@
 {
   "kind": "live_desktop_inspection_and_acceptance",
+  "protocol_generation": "pre-core-v2 focused scenario",
   "date": "2026-09-11",
   "models": {
     "lead": "claude-haiku-4-5",

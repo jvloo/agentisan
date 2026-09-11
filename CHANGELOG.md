@@ -11,7 +11,7 @@
   inspectable and independently verifiable after failure or restart.
 - Added scheduler fail-closed health behavior and recovery of abandoned verifier reservations.
 - Added first-class assignments with reserved turn/message slices and explicit lifecycle updates.
-- Derive assignment scope hashes from canonical objective and completion criteria instead of
+- Derived assignment scope hashes from canonical objective and completion criteria instead of
   accepting model-selected revision identifiers.
 - Added starvation-free scheduling around exhausted assignments and inspected assignment extension
   that reallocates only capacity remaining inside the original run limits.
@@ -19,7 +19,9 @@
   pause only their dependent worker.
 - Added inspected no-effect reconciliation for unknown turns and durable proposal verification after
   native failure.
-- Preserve already-published effects when reconciling a committed turn interrupted before its
+- Preserved already-published effects when reconciling a committed turn interrupted before its
   native completion receipt.
+- Refreshed product claims and live-validation evidence for the final core-v2 implementation:
+  62 ordinary tests and both Sonnet/Luna low-effort provider topologies.
 - Clarified migration compatibility and current validation limits, including the terminal-only
   watcher assertion.
