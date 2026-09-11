@@ -105,10 +105,10 @@ struct Mcp {
     seq: u64,
 }
 impl Mcp {
-    async fn start(demo: &Demo, principal: Option<&str>) -> Self {
+    async fn start(demo: &Demo, principal: Option<&str>, profile: &str) -> Self {
         let mut child = demo
             .command(principal)
-            .arg("mcp")
+            .args(["mcp", "--profile", profile])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -169,9 +169,102 @@ fn tool_json(response: &Value) -> Value {
 }
 
 #[tokio::test]
+async fn explicit_mcp_profiles_expose_separate_least_privilege_catalogs() {
+    let demo = Demo::start().await;
+
+    let missing_profile = demo
+        .command(Some("inventory_reader"))
+        .arg("mcp")
+        .output()
+        .await
+        .unwrap();
+    assert!(!missing_profile.status.success());
+
+    let mut observer = Mcp::start(&demo, Some("inventory_reader"), "observer").await;
+    let observer_tools = observer.request("tools/list", json!({})).await;
+    let mut observer_names: Vec<_> = observer_tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    observer_names.sort_unstable();
+    assert_eq!(
+        observer_names,
+        [
+            "agents_inspect",
+            "agents_list",
+            "groups_list",
+            "messages_list",
+            "runs_inspect",
+            "teams_list",
+            "whoami",
+        ]
+    );
+    assert!(
+        observer_tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["annotations"]["readOnlyHint"] == true)
+    );
+
+    let mut agent = Mcp::start(&demo, Some("inventory_reader"), "agent").await;
+    let agent_tools = agent.request("tools/list", json!({})).await;
+    let mut agent_names: Vec<_> = agent_tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    agent_names.sort_unstable();
+    assert_eq!(
+        agent_names,
+        [
+            "agent_context_get",
+            "inbox_read",
+            "message_send",
+            "result_propose"
+        ]
+    );
+    for tool in agent_tools["result"]["tools"].as_array().unwrap() {
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{tool}");
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
+    }
+    assert_eq!(
+        tool_json(&agent.call("agent_context_get", json!({})).await)["identity"]["agent_id"],
+        "inventory_lead"
+    );
+
+    let broad_read = agent.call("groups_list", json!({})).await;
+    assert!(broad_read.get("error").is_some(), "{broad_read}");
+    let spoof = agent
+        .call(
+            "message_send",
+            json!({
+                "run_id":"run_fake",
+                "to":"inventory_lead",
+                "body":"hello",
+                "reply_to":null,
+                "idempotency_key":"send_1",
+                "sender":"support_lead"
+            }),
+        )
+        .await;
+    assert!(spoof.get("error").is_some() || spoof["result"]["isError"] == true);
+    let rejected = agent.call("inbox_read", json!({"run_id":"run_fake"})).await;
+    assert_eq!(rejected["result"]["isError"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(rejected["result"]["content"][0]["text"].as_str().unwrap())
+            .unwrap()["error"]["code"],
+        "request_rejected"
+    );
+}
+
+#[tokio::test]
 async fn cli_and_mcp_parity_with_connector_disconnect_and_service_restart() {
     let mut demo = Demo::start().await;
-    let mut mcp = Mcp::start(&demo, Some("inventory_reader")).await;
+    let mut mcp = Mcp::start(&demo, Some("inventory_reader"), "observer").await;
     let tools = mcp.request("tools/list", json!({})).await;
     let names: Vec<_> = tools["result"]["tools"]
         .as_array()
@@ -179,11 +272,9 @@ async fn cli_and_mcp_parity_with_connector_disconnect_and_service_restart() {
         .iter()
         .map(|x| x["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 10);
+    assert_eq!(names.len(), 7);
     for tool in tools["result"]["tools"].as_array().unwrap() {
-        let mutating = ["messages_send", "messages_receive", "runs_complete"]
-            .contains(&tool["name"].as_str().unwrap());
-        assert_eq!(tool["annotations"]["readOnlyHint"], !mutating);
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
         assert_eq!(tool["annotations"]["destructiveHint"], false);
     }
     for name in [
@@ -262,7 +353,7 @@ async fn caller_isolation_and_unbound_identity_through_real_interfaces() {
         .await
         .unwrap();
     assert!(!out.status.success());
-    let mut mcp = Mcp::start(&demo, Some("inventory_reader")).await;
+    let mut mcp = Mcp::start(&demo, Some("inventory_reader"), "observer").await;
     let denied = mcp
         .call("agents_inspect", json!({"agent_id":"support_lead"}))
         .await;
@@ -278,7 +369,7 @@ async fn caller_isolation_and_unbound_identity_through_real_interfaces() {
         )
         .await;
     assert!(spoof.get("error").is_some() || spoof["result"]["isError"] == true);
-    let mut anonymous = Mcp::start(&demo, None).await;
+    let mut anonymous = Mcp::start(&demo, None, "observer").await;
     assert_eq!(
         tool_json(&anonymous.call("whoami", json!({})).await)["status"],
         "unbound"

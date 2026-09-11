@@ -51,7 +51,11 @@ enum Command {
         enable_cli_workers: bool,
     },
     /// Connect an MCP host over stdio. Registry records remain in the separate service.
-    Mcp,
+    Mcp {
+        /// Select the least-privilege tool surface for this host.
+        #[arg(long, value_enum)]
+        profile: mcp::Profile,
+    },
     /// Report the credential's agent binding, or unbound when none is provided.
     Whoami,
     Groups {
@@ -236,8 +240,12 @@ async fn run(cli: Cli) -> Result<()> {
             drop(lock);
             return result;
         }
-        Command::Mcp => {
-            return mcp::run(Client::new(&cli.endpoint, cli.credential_file.as_deref())?).await;
+        Command::Mcp { profile } => {
+            return mcp::run(
+                Client::new(&cli.endpoint, cli.credential_file.as_deref())?,
+                profile,
+            )
+            .await;
         }
         Command::Whoami => Query::Whoami {},
         Command::Groups {

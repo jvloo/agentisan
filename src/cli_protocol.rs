@@ -10,10 +10,22 @@ pub fn build(
     native_id: Option<&str>,
     new_claude_id: &str,
 ) -> Vec<String> {
+    let mcp_args = agent_mcp_args(mcp_args);
     match member.provider {
-        Provider::Claude => build_claude(member, mcp_exe, mcp_args, native_id, new_claude_id),
-        Provider::Codex => build_codex(member, mcp_exe, mcp_args, native_id),
+        Provider::Claude => build_claude(member, mcp_exe, &mcp_args, native_id, new_claude_id),
+        Provider::Codex => build_codex(member, mcp_exe, &mcp_args, native_id),
     }
+}
+
+fn agent_mcp_args(args: &[String]) -> Vec<String> {
+    let mut scoped = args.to_vec();
+    // Worker-host construction deliberately stays provider-neutral. Enforce the
+    // least-privilege MCP profile at the final native CLI configuration boundary.
+    if !scoped.windows(2).any(|pair| pair == ["--profile", "agent"]) {
+        scoped.push("--profile".to_string());
+        scoped.push("agent".to_string());
+    }
+    scoped
 }
 
 fn build_claude(
@@ -384,6 +396,33 @@ fn parse_codex(events: &[Value], expected: Option<&str>) -> Result<Parsed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_workers_are_forced_onto_agent_mcp_profile() {
+        let base = vec![
+            "--endpoint".to_string(),
+            "http://127.0.0.1:7437".to_string(),
+            "mcp".to_string(),
+        ];
+        assert_eq!(
+            agent_mcp_args(&base),
+            [
+                "--endpoint",
+                "http://127.0.0.1:7437",
+                "mcp",
+                "--profile",
+                "agent"
+            ]
+        );
+        let scoped = agent_mcp_args(&agent_mcp_args(&base));
+        assert_eq!(
+            scoped
+                .windows(2)
+                .filter(|pair| pair == &["--profile", "agent"])
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn claude_missing_completion_rejected() {
