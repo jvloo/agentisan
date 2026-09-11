@@ -1,11 +1,12 @@
-# Architecture (proposed)
+# Architecture
 
 This document describes Agentisan's broader runtime design. The Rust implementation now includes
 the fixture registry, managed native CLI teams with persistent MCP messages, bounded invocations,
 native session continuation, authoritative live inspection, and administrator-selected deterministic
 verification of exact proposed results. See the [live-team contract](live-teams.md) for what is
-implemented and its limits. Human approvals, general effect reconciliation, direct API adapters,
-and native deep-link opening remain proposed. Rust is selected for the core
+implemented and its limits. Scoped decision records and no-effect reconciliation are implemented;
+native human-interaction adapters, other effect outcomes, direct API adapters, and native deep-link
+opening remain proposed. Rust is selected for the core
 ([decision](decisions/0001-rust-core.md)); a general durable-execution engine remains undecided.
 
 ## Goals and non-goals
@@ -26,8 +27,10 @@ Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive
 The local service — not any model — owns:
 
 - The **registry**: canonical group/team/agent/job/attempt IDs, parentage, and separately-tracked exact native adapter/host/session/thread/agent bindings, version/capabilities, and connection freshness.
-- **Message and event persistence**, including idempotency keys and replayable cursors.
-- **Permissions and budgets**, enforced with atomic reservations.
+- **Message, claim, assignment, decision, and work-operation persistence**, including idempotency
+  keys and atomic publication. A general append-only event/cursor model remains planned.
+- **Permissions and budgets**, including root turn/message limits and atomic assignment slices.
+  Provider token/cost reservations remain planned.
 - **Job scheduling and attempts**, deterministically where possible — scheduling and policy decisions do not require a model call.
 - **Human decisions and artifacts**.
 
@@ -37,13 +40,35 @@ The main agent's job is to propose decomposition and integrate results; workers 
 
 A native session ID, thread ID, or subagent ID are **not interchangeable** — a native ID does not by itself grant authority to act. An MCP connection, client name, or working directory does not identify the calling conversation on its own; a trusted per-call or host binding is required. When binding is unavailable, the registry must mark it **unbound** rather than guess by inferring the newest matching session. Lifecycle callbacks (connect/disconnect/resume) can fire more than once, so registration and binding updates must be **idempotent**. A turn ending in a client is not proof that an agent process exited.
 
-## Messaging
+## Messaging and turn leases
 
-Authenticated CLI/MCP messages carry an idempotency/message ID, exact recipient, job/attempt ID, kind, correlation/reply-to reference, and artifact revision references. The sender is derived from the verified binding, never claimed by the caller. The service persists **acceptance before delivery**, and distinguishes accepted, delivered, job-completed, and result-accepted states separately. Workers receive only the context scoped to their job. Delivery uses a single persistent inbox/outbox domain — not fragile navigation of a native client's UI/window state — with cursors so a reconnecting client can replay missed events without re-executing already-applied work. There is no universal exactly-once guarantee for external side effects; unknown delivery or completion status triggers reconciliation, and retries are bounded to cases where they are safe.
+Authenticated messages carry an idempotency/message ID, exact recipient, job/attempt ID, kind, correlation/reply-to reference, and artifact revision references. The sender is derived from the verified binding, never claimed by the caller. Each native turn receives a short-lived lease credential bound to one agent, run, turn, and ownership epoch; a newer epoch fences stale writers. The first `inbox_read` persists a stable snapshot of claimed messages plus visible assignments and decisions; later reads return it unchanged without acknowledgement. `message_send` stages an outbound message, and `turn_commit` atomically acknowledges claimed inputs and publishes staged messages. A successful lead `result_propose` commits its inputs and durable proposal atomically. The service distinguishes accepted, delivered, processed, job-completed, and result-accepted states separately. Workers receive only job-scoped context. There is no universal exactly-once guarantee for external side effects; unknown delivery or completion status triggers reconciliation, and retries are bounded to cases where they are safe.
+
+## MCP profiles
+
+The model-facing MCP surface is role-scoped. The **agent** profile exposes
+`agent_context_get`, `inbox_read`, `message_send`, `assignment_update`, `decision_request`, and
+`turn_commit`; leads additionally receive `assignment_create` and `result_propose`. The
+**observer** profile exposes bounded read-only inspection tools and cannot send,
+resume, approve, or execute. Connector and administrator operations remain outside model MCP:
+connectors claim delivery and report native state through a separate authenticated interface;
+administrators create teams, reconcile unknown turns as no-effect after inspection, select
+verifiers, and resolve or invalidate exact decision revisions. A connector protocol, other effect
+reconciliation outcomes, and provider token/cost reservations remain design targets.
 
 ## Budgets
 
-A root budget is shared across the main agent, workers, retries, review, and recovery for one objective. Reservations are atomic and made **before** a model call, so concurrent workers cannot overspend the same allowance; usage that comes back unknown stays reserved rather than assumed free. The service tracks max calls, wall-clock time, concurrency, message exchange counts, child delegation depth, and stagnation, so a budget cannot expand itself. Token accounting and cache hits are tracked separately from dollar cost. Enforcement of cancellation and usage caps depends on what each provider adapter actually supports — the service will not claim an exact bill cap or symmetric control over opaque native workers it cannot fully observe.
+A run has root invocation, message, and wall-clock limits. Creating an assignment atomically
+reserves bounded turn and message slices while retaining integration capacity for the lead; worker
+dispatch and messages charge that assignment. Assignments cannot enlarge the root allowance. Native
+usage and cache data are retained when reported, but missing usage is still only labeled unknown:
+provider token and dollar reservations are not implemented. Enforcement of cancellation and usage
+caps depends on what each provider adapter actually supports, so the service does not claim an exact
+bill cap or symmetric control over opaque native workers.
+
+The scheduler skips a recipient whose assignment deadline or reserved turn slice is exhausted, so
+other assignments and lead work continue. A trusted local administrator may extend that assignment
+after inspection, but only by reserving capacity still available inside the original root limits.
 
 This enforcement covers calls admitted by the service. A client-owned main agent may make calls outside that boundary: record usage when the host reports it and label missing coverage explicitly. Do not advertise a whole-workflow spending limit when the main agent or a worker can spend outside the service's control. Strict jobs must use adapters that supply their required controls or be rejected before dispatch. Reserve a bounded call allowance with appropriate headroom; a reservation alone is not a provider billing cap.
 
@@ -53,7 +78,14 @@ Each job gets its own permissions and an isolated writer workspace; a plain work
 
 ## Human decisions
 
-Every human decision is persisted with the evidence considered, the proposed action, its scope and artifact revision, the principal eligible to decide, and exactly one resolution. A trusted human interaction in the existing host or an authenticated decision mechanism can supply approval; a model calling an "approve" tool is not human consent. Existing authorizations are honored across restarts while their scope and validity remain applicable; a missing decision blocks only the dependent work, and silence is never treated as approval. A material change to the proposed action invalidates a prior approval. Cancellation distinguishes a cancellation *request* from a *confirmed* stop, and retains its receipt and any existing artifacts.
+Agentisan derives each assignment's scope hash from its objective and completion criteria. An agent
+can request a decision with that exact scope hash, an artifact hash, offered choices, and an
+optional dependent assignment. The request is staged until the turn commits. A model cannot resolve
+it. The trusted local CLI records one resolution under the local OS administrator boundary, rejects
+mismatched revisions or choices, and can explicitly invalidate a request or resolution. A blocking
+assignment decision pauses that worker without starving unrelated assignments. Native authenticated
+human-interaction adapters and general cancellation decisions remain future work; silence is never
+approval.
 
 ## Inspection
 
@@ -62,3 +94,9 @@ Every agent is inspectable through both the CLI and MCP: activity, sent/received
 ## Infrastructure (initial)
 
 The initial deployment target is a single local background service, SQLite for persistence, and filesystem-based artifacts, alongside an isolated executor added before any code execution capability ships. An MCP subprocess connector is a thin transport and must not own the lifecycle of durable jobs — jobs must survive the connector process exiting. A powered-off or sleeping host cannot make progress; persisting data does not, by itself, make retrying an arbitrary external side effect safe.
+
+The worker scheduler is authoritative only while healthy. A scheduler failure fences active work
+and fails closed rather than leaving an HTTP process reporting stale activity. Verifier attempts
+are reserved durably; startup and lock recovery reconcile abandoned `running` reservations to an
+error state before another verification can proceed. A durable proposal remains inspectable and
+independently verifiable after native process failure or service restart.

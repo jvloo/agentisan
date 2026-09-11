@@ -68,7 +68,7 @@ impl Registry {
             0 => {
                 sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
             }
-            1..=4 => {}
+            1..=7 => {}
             _ => {
                 return Err(RegistryError::Invalid(
                     "unsupported database schema version".into(),
@@ -85,6 +85,21 @@ impl Registry {
         }
         if version < 4 {
             sqlx::raw_sql(crate::verification::SCHEMA)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if version < 5 {
+            sqlx::raw_sql(crate::teams::LEASE_SCHEMA)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if version < 6 {
+            sqlx::raw_sql(crate::assignments::SCHEMA)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if version < 7 {
+            sqlx::raw_sql(crate::teams::SNAPSHOT_SCHEMA)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -217,6 +232,23 @@ impl Registry {
                 .await?;
         let principal: Principal =
             serde_json::from_str(&payload.ok_or(RegistryError::Unauthorized)?)?;
+        let lease_record = sqlx::query("SELECT l.turn_id,l.agent_id,l.epoch,l.state,l.expires_at,t.run_id,t.state AS turn_state,e.epoch AS current_epoch FROM turn_leases l JOIN turns t ON t.id=l.turn_id LEFT JOIN agent_epochs e ON e.agent_id=l.agent_id WHERE l.principal_id=?")
+            .bind(principal.id.as_str()).fetch_optional(&self.pool).await?;
+        let lease = lease_record.as_ref().filter(|row| {
+            matches!(
+                row.get::<String, _>("state").as_str(),
+                "active" | "committed"
+            ) && row.get::<i64, _>("expires_at") > crate::teams::now()
+                && row.get::<String, _>("turn_state") == "running"
+                && row.get::<i64, _>("epoch") == row.get::<i64, _>("current_epoch")
+        });
+        if lease_record.is_some() && lease.is_none() {
+            return if matches!(&query, Query::Whoami {}) {
+                Ok(json!({"status":"unbound","reason":"Turn lease is no longer active"}))
+            } else {
+                Err(RegistryError::Unauthorized)
+            };
+        }
         match query {
             Query::Whoami {} => {
                 let managed: i64 =
@@ -224,16 +256,31 @@ impl Registry {
                         .bind(principal.agent_id.as_ref().map(AgentId::as_str))
                         .fetch_one(&self.pool)
                         .await?;
+                let lease_context = lease.as_ref().map(|row| {
+                    json!({
+                        "turn_id":row.get::<String,_>("turn_id"),
+                        "run_id":row.get::<String,_>("run_id"),
+                        "ownership_epoch":row.get::<i64,_>("epoch"),
+                        "state":row.get::<String,_>("state"),
+                        "expires_at":row.get::<i64,_>("expires_at")
+                    })
+                });
                 Ok(
-                    json!({"status":if principal.agent_id.is_some() {"bound"} else {"unbound"},"principal_id":principal.id,"agent_id":principal.agent_id,"evidence":if managed>0 {"managed_credential"} else {"fixture_credential"},"source":if managed>0 {"managed_cli"} else {"fixture"}}),
+                    json!({"status":if principal.agent_id.is_some() {"bound"} else {"unbound"},"principal_id":principal.id,"agent_id":principal.agent_id,"evidence":if lease.is_some() {"turn_lease"} else if managed>0 {"managed_credential"} else {"fixture_credential"},"source":if lease.is_some() {"managed_turn"} else if managed>0 {"managed_cli"} else {"fixture"},"lease":lease_context}),
                 )
             }
             Query::GroupsList {} => {
+                if lease.is_some() {
+                    return Err(RegistryError::NotFound);
+                }
                 let rows = sqlx::query("SELECT g.payload FROM groups g JOIN grants p ON p.group_id=g.id WHERE p.principal_id=? ORDER BY g.id")
                     .bind(principal.id.as_str()).fetch_all(&self.pool).await?;
                 Ok(json!({"groups":decode_rows::<Group>(rows)?}))
             }
             Query::TeamsList { group_id } => {
+                if lease.is_some() {
+                    return Err(RegistryError::NotFound);
+                }
                 self.require_group(principal.id.as_str(), group_id.as_str())
                     .await?;
                 let rows = sqlx::query("SELECT payload FROM teams WHERE group_id=? ORDER BY id")
@@ -243,6 +290,9 @@ impl Registry {
                 Ok(json!({"teams":decode_rows::<Team>(rows)?}))
             }
             Query::AgentsList { team_id } => {
+                if lease.is_some() {
+                    return Err(RegistryError::NotFound);
+                }
                 let group: Option<String> =
                     sqlx::query_scalar("SELECT group_id FROM teams WHERE id=?")
                         .bind(team_id.as_str())
@@ -260,6 +310,12 @@ impl Registry {
                 Ok(json!({"agents":decode_rows::<Agent>(rows)?}))
             }
             Query::AgentsInspect { agent_id } => {
+                if lease
+                    .as_ref()
+                    .is_some_and(|row| row.get::<String, _>("agent_id") != agent_id.as_str())
+                {
+                    return Err(RegistryError::NotFound);
+                }
                 let payload: Option<String> = sqlx::query_scalar("SELECT a.payload FROM agents a JOIN teams t ON t.id=a.team_id JOIN grants p ON p.group_id=t.group_id WHERE a.id=? AND p.principal_id=?")
                     .bind(agent_id.as_str()).bind(principal.id.as_str()).fetch_optional(&self.pool).await?;
                 let agent: Agent = serde_json::from_str(&payload.ok_or(RegistryError::NotFound)?)?;
@@ -301,8 +357,18 @@ impl Registry {
                     json!({"agent":agent,"source":"fixture","connection":"unverified","activity":"unobserved","capabilities":{"inspect":true,"native_open":false,"native_resume":false,"execute":false}}),
                 )
             }
-            Query::RunsInspect { run_id } => crate::teams::inspect_run(self, token, &run_id).await,
-            Query::MessagesList { run_id } => crate::teams::messages(self, token, &run_id).await,
+            Query::RunsInspect { run_id } => {
+                if lease.is_some() {
+                    return Err(RegistryError::NotFound);
+                }
+                crate::teams::inspect_run(self, token, &run_id).await
+            }
+            Query::MessagesList { run_id } => {
+                if lease.is_some() {
+                    return Err(RegistryError::NotFound);
+                }
+                crate::teams::messages(self, token, &run_id).await
+            }
         }
     }
 

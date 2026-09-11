@@ -43,6 +43,14 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn valid_run_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 pub async fn inspect(
     registry: &Registry,
     run_id: &str,
@@ -87,17 +95,20 @@ async fn reserve(
     }
     let verifier_hash = digest(&std::fs::read(&verifier)?);
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row = sqlx::query("SELECT state,result FROM runs WHERE id=?")
+    let row = sqlx::query("SELECT r.state,p.result FROM runs r LEFT JOIN run_proposals p ON p.run_id=r.id WHERE r.id=?")
         .bind(run_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("run not found"))?;
-    if row.get::<String, _>("state") != "completed" {
-        bail!("only a completed agent proposal can be independently verified");
+    if matches!(
+        row.get::<String, _>("state").as_str(),
+        "queued" | "running" | "completing"
+    ) {
+        bail!("an agent proposal can be verified only after its native turn settles");
     }
     let result = row
         .get::<Option<String>, _>("result")
-        .ok_or_else(|| anyhow::anyhow!("completed run has no proposed result"))?;
+        .ok_or_else(|| anyhow::anyhow!("run has no durable proposed result"))?;
     let id = teams::new_id("verification");
     sqlx::query("INSERT INTO verifications(id,run_id,status,verifier_path,verifier_sha256,result_sha256,started_at,artifacts) VALUES(?,?,'running',?,?,?,?,?)")
         .bind(&id)
@@ -121,6 +132,26 @@ async fn record_error(registry: &Registry, id: &str, message: &str) -> Result<()
         .bind(id)
         .execute(&registry.pool)
         .await?;
+    Ok(())
+}
+
+/// A verifier has no durable completion receipt until `record_result` (or
+/// `record_error`) commits. Normal CLI verification holds `admin.lock` for the
+/// whole invocation, so after a crashed verifier releases that lock the next
+/// invocation can safely fence its abandoned reservation before starting work.
+///
+/// This deliberately is not called by the HTTP service: a service start cannot
+/// prove that a separately launched administrative verifier is no longer alive.
+async fn recover_abandoned_reservations(registry: &Registry) -> Result<()> {
+    sqlx::query(
+        "UPDATE verifications SET status='error',ended_at=?,summary=? WHERE status='running'",
+    )
+    .bind(teams::now())
+    .bind(
+        "verification process ended before a completion receipt; inspect artifacts before retrying",
+    )
+    .execute(&registry.pool)
+    .await?;
     Ok(())
 }
 
@@ -161,9 +192,13 @@ pub async fn verify(
     verifier: &Path,
     timeout_seconds: u64,
 ) -> Result<Value> {
-    if !verifier.is_absolute() || !(1..=300).contains(&timeout_seconds) {
+    if !valid_run_id(run_id) || !verifier.is_absolute() || !(1..=300).contains(&timeout_seconds) {
         bail!("verification requires an absolute executable and a 1 to 300 second deadline");
     }
+    // Serialize the public CLI path. This makes a released lock evidence that a
+    // previous CLI verifier cannot still own its reservation.
+    let _admin_lock = crate::fixture::admin_lock(data_dir)?;
+    recover_abandoned_reservations(registry).await?;
     let attempt = teams::new_id("verification");
     let artifacts = data_dir.join("runs").join(run_id).join(&attempt);
     private_dir(&artifacts)?;

@@ -69,11 +69,14 @@ template:
   runs watch RUN_ID --interval-ms 500 --timeout-seconds 300
 ```
 
-The existing stdio MCP connector exposes the same inspection operations. New tools are
-`runs_inspect`, `messages_list`, `messages_receive`, `messages_send`, and `runs_complete`.
-The three mutating tools require the credential-bound agent's active turn in that run.
+The existing stdio MCP connector exposes the same inspection operations through the observer
+profile. The agent profile exposes `agent_context_get`, `inbox_read`, `message_send`,
+`assignment_update`, `decision_request`, `turn_commit`, and, for leads, `assignment_create` and
+`result_propose`. Mutating tools require a short-lived credential
+bound to the agent, run, turn, and current ownership epoch.
 They cannot register teams, expand limits, or confer human approval. Read access follows
-the credential's group grants; message recipients must belong to the same team.
+group grants for observer credentials; lease credentials can inspect only their own active identity.
+Message recipients must belong to the same team.
 
 Native session/thread IDs appear as soon as the native CLI reports them, and every resumed
 turn must return the same ID. The native CLI stores remain the normal user stores. Native
@@ -90,9 +93,17 @@ an externally driven CLI session.
 Messages are committed before an acceptance receipt is returned. Send keys are scoped to
 run and sender; an identical resend returns the original receipt, while changed payloads
 under the same key fail. Replies must address the original sender in the same run.
-`messages_receive` acknowledges delivery, which is distinct from finishing the assignment.
-The lead can propose completion only after pending messages are received, other active turns
-settle, and each worker has reported to it. Native turn completion is verified separately.
+`inbox_read` stores and returns one stable snapshot of messages, assignments, and decisions but
+does not acknowledge them; repeated reads return the same snapshot even if an administrator
+updates work records meanwhile. Those updates appear on a later turn. `message_send` stages an
+outgoing message.
+`turn_commit` atomically acknowledges claimed inputs and publishes staged messages. A successful
+`result_propose` also commits the lead's inputs and durable proposal atomically. The lead can
+create bounded assignments with reserved turn/message slices; assignees report them and the lead
+closes them. Agentisan derives the immutable scope hash from the objective and completion criteria
+and returns it in the creation receipt; the model does not choose that revision identifier. When
+assignments exist, completion requires all of them to be terminal. Legacy runs
+without assignments retain the earlier worker-report gate. Native turn completion is verified separately.
 The final run result still says `not_independently_verified`: it is an agent proposal, not proof
 of correctness or a human approval. A local administrator may run one exact-result verifier:
 
@@ -139,22 +150,67 @@ turn with unread messages, an administrator can inspect the cause, fix it, and e
 ```
 
 This narrow resume path keeps the original deadline, invocation count, and native IDs. It
-rejects exhausted deadlines, failed/unknown turns, and runs without unread messages. General
-reconciliation of interrupted model/tool work and durable human decisions remain future work.
+rejects exhausted deadlines, unresolved unknown turns, and runs without unread messages. After
+inspecting an unknown turn and confirming it produced no effect, a local administrator can run:
+
+```sh
+./target/debug/agentisan runs reconcile TURN_ID --no-effect --after-inspection
+./target/debug/agentisan runs resume RUN_ID --after-inspection
+```
+
+For an uncommitted turn, no-effect reconciliation discards its private staged work and redelivers
+its inputs. For a turn that already committed before native completion, it preserves the published
+messages, assignment changes, decisions, proposal, and acknowledged inputs, and reconciles only the
+unrecorded native effect. This never classifies or replays uncertain external effects automatically.
+Other outcomes still require a future reconciliation path.
+
+Agents may stage a scoped `decision_request`, but cannot resolve it. The trusted local CLI requires
+the exact scope hash, artifact hash, and offered choice:
+
+```sh
+./target/debug/agentisan decisions inspect DECISION_ID
+./target/debug/agentisan decisions resolve DECISION_ID \
+  --scope-hash SHA256 --artifact-hash SHA256 --choice approve
+```
+
+Resolution records the local OS administrator boundary; native authenticated human-interaction
+adapters remain future work.
+
+An exhausted or expired assignment does not block messages for other recipients. If its pending
+work is the only remaining work, the run stalls without consuming another provider call. Inspect
+the exact assignment, then allocate additional capacity from the unchanged root limits and resume:
+
+```sh
+./target/debug/agentisan assignments inspect ASSIGNMENT_ID
+./target/debug/agentisan assignments extend ASSIGNMENT_ID \
+  --add-turns 1 --deadline-seconds 120 --after-inspection
+./target/debug/agentisan runs resume RUN_ID --after-inspection
+```
+
+The extension cannot enlarge the run's invocation, message, or wall-clock limit. If the root has
+no remaining capacity, the work remains stalled for explicit reconciliation.
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
 
-Database schema version 3 records initialization readiness in the same transaction as a
-successful fixture import or team creation. Failed first-time initialization may leave a
-schema file, but the service will not treat it as ready. Existing databases with records are
-migrated; an old empty database without readiness evidence needs an explicit valid import or
-team creation. No failed import deletes an existing database.
+Database schema version 7 records per-agent ownership epochs, short-lived turn leases, complete
+input snapshots, claimed turn inputs, staged messages and work operations, assignments, decisions,
+and durable run proposals.
+Initialization readiness is recorded in
+the same transaction as a successful fixture import or team creation. Failed first-time
+initialization may leave a schema file, but the service will not treat it as ready. Existing
+databases with records are migrated through schema version 7; old delivery receipts remain
+readable. New turns use lease-aware delivery and never restore acknowledge-on-read semantics. An
+old empty database without readiness evidence needs an explicit valid import or team creation.
+No failed import deletes an existing database.
 
 ## Repeat the live acceptance test
 
 Ordinary tests use simulated adapters and real local transports. The live test is ignored
 unless explicitly selected and enabled. It makes real account model calls, preserves native
 sessions, and verifies all six lead/worker/peer routes plus stable, distinct native IDs.
+The default acceptance profile uses Claude Sonnet and Codex Luna at low effort. Override
+`AGENTISAN_LIVE_CLAUDE_MODEL`, `AGENTISAN_LIVE_CODEX_MODEL`, or `AGENTISAN_LIVE_EFFORT` for a
+controlled comparison without editing the test.
 
 ```sh
 AGENTISAN_LIVE_TESTS=1 \

@@ -4,13 +4,14 @@
 
 Agentisan is a local toolkit for making groups of agent teams identifiable and inspectable
 from existing CLI and Desktop clients. Its longer-term goal is bounded collaboration across
-providers, with persistent work records and explicit human decisions.
+providers, with persistent work records and explicit human decision boundaries.
 
-**Current status: reusable native CLI teams.** The Rust service can run a Claude lead with
+**Current status: reusable native CLI teams (core-v2).** The Rust service can run a Claude lead with
 Codex workers and the reverse, with real peer-to-peer MCP messages and persistent native
 session IDs. Live execution currently supports macOS/Linux and consultation profiles;
-shell/file-editing tools are disabled. Human approval workflows, general job reconciliation,
-direct model-API workers, and native deep-link opening remain planned.
+shell/file-editing tools are disabled. First-class assignments, scoped human decision records,
+and inspected no-effect reconciliation are available; native approval UI adapters, general effect
+reconciliation, direct model-API workers, and native deep-link opening remain planned.
 
 Start with the [live-team guide](docs/live-teams.md) and either the
 [Claude-led](examples/claude-led-team.json) or [Codex-led](examples/codex-led-team.json)
@@ -29,9 +30,23 @@ configuration. The fixture walkthrough below exercises inspection without model 
 - Deliver real messages through MCP between the lead and workers and directly between workers.
 - Bound CLI invocations, message count, elapsed time, and output; stop stalled work.
 - Preserve exact native sessions between turns, with explicit resume of inspected unread work.
-- Stream changed authoritative run snapshots with a bounded, read-only CLI watch command.
+- Stream authoritative run snapshots with a bounded, read-only CLI watch command.
+- Issue short-lived per-turn lease credentials fenced by agent ownership epochs.
+- Separate agent and observer MCP profiles; observer credentials are read-only.
+- Read a stable message, assignment, and decision snapshot without acknowledgement; stage sends
+  and publish them with an atomic `turn_commit` (a successful lead proposal commits its inputs atomically).
+- Persist result proposals independently of native turn success so they can be verified after
+  a process failure or service restart.
+- Fail closed when the worker scheduler is unhealthy and recover abandoned verifier reservations.
 - Run an administrator-selected deterministic verifier against the exact proposed result and
   persist an accepted, rejected, or error receipt with result and verifier hashes.
+- Create bounded assignments with reserved turn/message slices and explicit lifecycle states.
+- Skip recipients whose assignment slice is exhausted so independent work can continue; a trusted
+  local administrator can extend a stalled assignment only within the run's original root limits.
+- Persist scoped human decision requests; only the trusted local CLI can inspect, resolve, or
+  invalidate them, and a blocking decision pauses only its dependent assignment.
+- Reconcile an interrupted turn as producing no effect after explicit inspection, then resume it
+  under a fresh lease without silently replaying uncertain work.
 
 Fixture bindings remain simulated. Managed bindings record IDs returned by configured native
 CLIs. `bound` identifies the provisioned credential; it does not independently authenticate
@@ -85,16 +100,18 @@ absolute path to the built `agentisan` executable, using arguments shaped like:
   "args": [
     "--endpoint", "http://127.0.0.1:7437",
     "--credential-file", "/absolute/path/to/inventory_reader.token",
-    "mcp"
+    "mcp", "--profile", "observer"
   ]
 }
 ```
 
-The enclosing configuration format depends on the client. The connector exposes `whoami`,
+The enclosing configuration format depends on the client. The observer profile exposes `whoami`,
 `groups_list`, `teams_list`, `agents_list`, `agents_inspect`, `runs_inspect`, and `messages_list`
-for inspection. Managed agents additionally use `messages_receive`, `messages_send`, and
-`runs_complete` during their active turn. These do not expose shell execution, administrative
-registration, or human approval. Each connector has one explicitly provisioned credential;
+for inspection. The agent profile exposes `agent_context_get`, `inbox_read`, `message_send`,
+`assignment_update`, `decision_request`, `turn_commit`, and, for leads, `assignment_create` and
+`result_propose` during an active, short-lived turn lease. These
+profiles do not expose shell execution, administrative registration, or human approval. Each
+connector has one explicitly provisioned credential;
 sharing it across conversations shares access and does not identify those conversations.
 
 Agentisan's runtime state is authoritative while it owns a managed turn. A native Desktop client

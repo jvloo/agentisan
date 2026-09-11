@@ -51,7 +51,11 @@ enum Command {
         enable_cli_workers: bool,
     },
     /// Connect an MCP host over stdio. Registry records remain in the separate service.
-    Mcp,
+    Mcp {
+        /// Select the least-privilege tool surface for this host.
+        #[arg(long, value_enum)]
+        profile: mcp::Profile,
+    },
     /// Report the credential's agent binding, or unbound when none is provided.
     Whoami,
     Groups {
@@ -73,6 +77,16 @@ enum Command {
     Messages {
         #[command(subcommand)]
         command: MessagesCommand,
+    },
+    /// Trusted local administration of human decision records.
+    Decisions {
+        #[command(subcommand)]
+        command: DecisionsCommand,
+    },
+    /// Trusted local inspection and bounded recovery of assignment records.
+    Assignments {
+        #[command(subcommand)]
+        command: AssignmentsCommand,
     },
 }
 #[derive(Subcommand)]
@@ -135,12 +149,57 @@ enum RunsCommand {
         #[arg(long)]
         after_inspection: bool,
     },
+    /// Reconcile one interrupted turn after inspecting its native evidence.
+    Reconcile {
+        turn_id: String,
+        #[arg(long)]
+        no_effect: bool,
+        #[arg(long)]
+        after_inspection: bool,
+    },
 }
 #[derive(Subcommand)]
 enum MessagesCommand {
     List {
         #[arg(long)]
         run: String,
+    },
+}
+#[derive(Subcommand)]
+enum DecisionsCommand {
+    Inspect {
+        decision_id: String,
+    },
+    Resolve {
+        decision_id: String,
+        #[arg(long)]
+        scope_hash: String,
+        #[arg(long)]
+        artifact_hash: String,
+        #[arg(long)]
+        choice: String,
+    },
+    Invalidate {
+        decision_id: String,
+    },
+}
+#[derive(Subcommand)]
+enum AssignmentsCommand {
+    Inspect {
+        assignment_id: String,
+    },
+    /// Add capacity from the run's existing root limits after inspecting a stalled assignment.
+    Extend {
+        assignment_id: String,
+        #[arg(long, default_value_t = 0)]
+        add_turns: u32,
+        #[arg(long, default_value_t = 0)]
+        add_messages: u32,
+        /// Extend from now, capped by the original run deadline; zero leaves it unchanged.
+        #[arg(long, default_value_t = 0)]
+        deadline_seconds: u32,
+        #[arg(long)]
+        after_inspection: bool,
     },
 }
 #[derive(Subcommand)]
@@ -236,8 +295,12 @@ async fn run(cli: Cli) -> Result<()> {
             drop(lock);
             return result;
         }
-        Command::Mcp => {
-            return mcp::run(Client::new(&cli.endpoint, cli.credential_file.as_deref())?).await;
+        Command::Mcp { profile } => {
+            return mcp::run(
+                Client::new(&cli.endpoint, cli.credential_file.as_deref())?,
+                profile,
+            )
+            .await;
         }
         Command::Whoami => Query::Whoami {},
         Command::Groups {
@@ -378,9 +441,110 @@ async fn run(cli: Cli) -> Result<()> {
             );
             return Ok(());
         }
+        Command::Runs {
+            command:
+                RunsCommand::Reconcile {
+                    turn_id,
+                    no_effect,
+                    after_inspection,
+                },
+        } => {
+            if !no_effect || !after_inspection {
+                bail!("reconciliation requires --no-effect and --after-inspection");
+            }
+            let _lock = fixture::admin_lock(&cli.data_dir)?;
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let value = teams::reconcile_no_effect(&registry, &turn_id).await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
         Command::Messages {
             command: MessagesCommand::List { run },
         } => Query::MessagesList { run_id: run },
+        Command::Decisions {
+            command: DecisionsCommand::Inspect { decision_id },
+        } => {
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let value = agentisan::assignments::inspect_decision(&registry, &decision_id).await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
+        Command::Decisions {
+            command:
+                DecisionsCommand::Resolve {
+                    decision_id,
+                    scope_hash,
+                    artifact_hash,
+                    choice,
+                },
+        } => {
+            let _lock = fixture::admin_lock(&cli.data_dir)?;
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let value = agentisan::assignments::resolve_decision(
+                &registry,
+                &decision_id,
+                &scope_hash,
+                &artifact_hash,
+                &choice,
+                "local_os_admin",
+            )
+            .await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
+        Command::Decisions {
+            command: DecisionsCommand::Invalidate { decision_id },
+        } => {
+            let _lock = fixture::admin_lock(&cli.data_dir)?;
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            agentisan::assignments::invalidate_decision(&registry, &decision_id).await?;
+            registry.close().await;
+            println!(
+                "{}",
+                serde_json::json!({"decision_id":decision_id,"state":"invalidated"})
+            );
+            return Ok(());
+        }
+        Command::Assignments {
+            command: AssignmentsCommand::Inspect { assignment_id },
+        } => {
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let value =
+                agentisan::assignments::inspect_assignment(&registry, &assignment_id).await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
+        Command::Assignments {
+            command:
+                AssignmentsCommand::Extend {
+                    assignment_id,
+                    add_turns,
+                    add_messages,
+                    deadline_seconds,
+                    after_inspection,
+                },
+        } => {
+            if !after_inspection {
+                bail!("inspect the assignment first, then acknowledge with --after-inspection");
+            }
+            let _lock = fixture::admin_lock(&cli.data_dir)?;
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let value = agentisan::assignments::extend_assignment(
+                &registry,
+                &assignment_id,
+                add_turns,
+                add_messages,
+                deadline_seconds,
+            )
+            .await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
         Command::Agents {
             command: AgentsCommand::List { team },
         } => Query::AgentsList {
