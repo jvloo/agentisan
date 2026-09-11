@@ -43,6 +43,14 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn valid_run_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 pub async fn inspect(
     registry: &Registry,
     run_id: &str,
@@ -184,7 +192,7 @@ pub async fn verify(
     verifier: &Path,
     timeout_seconds: u64,
 ) -> Result<Value> {
-    if !verifier.is_absolute() || !(1..=300).contains(&timeout_seconds) {
+    if !valid_run_id(run_id) || !verifier.is_absolute() || !(1..=300).contains(&timeout_seconds) {
         bail!("verification requires an absolute executable and a 1 to 300 second deadline");
     }
     // Serialize the public CLI path. This makes a released lock evidence that a

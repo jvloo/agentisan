@@ -344,7 +344,7 @@ async fn explicit_mcp_profiles_expose_separate_least_privilege_catalogs() {
         .iter()
         .find(|tool| tool["name"] == "inbox_read")
         .unwrap();
-    assert_eq!(inbox["annotations"]["readOnlyHint"], true);
+    assert_eq!(inbox["annotations"]["readOnlyHint"], false);
     assert_eq!(inbox["annotations"]["idempotentHint"], true);
     let commit = agent_tools["result"]["tools"]
         .as_array()

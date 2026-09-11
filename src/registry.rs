@@ -222,8 +222,23 @@ impl Registry {
                 .await?;
         let principal: Principal =
             serde_json::from_str(&payload.ok_or(RegistryError::Unauthorized)?)?;
-        let lease = sqlx::query("SELECT l.turn_id,l.agent_id,l.epoch,l.state,l.expires_at,t.run_id FROM turn_leases l JOIN turns t ON t.id=l.turn_id WHERE l.principal_id=?")
+        let lease_record = sqlx::query("SELECT l.turn_id,l.agent_id,l.epoch,l.state,l.expires_at,t.run_id,t.state AS turn_state,e.epoch AS current_epoch FROM turn_leases l JOIN turns t ON t.id=l.turn_id LEFT JOIN agent_epochs e ON e.agent_id=l.agent_id WHERE l.principal_id=?")
             .bind(principal.id.as_str()).fetch_optional(&self.pool).await?;
+        let lease = lease_record.as_ref().filter(|row| {
+            matches!(
+                row.get::<String, _>("state").as_str(),
+                "active" | "committed"
+            ) && row.get::<i64, _>("expires_at") > crate::teams::now()
+                && row.get::<String, _>("turn_state") == "running"
+                && row.get::<i64, _>("epoch") == row.get::<i64, _>("current_epoch")
+        });
+        if lease_record.is_some() && lease.is_none() {
+            return if matches!(&query, Query::Whoami {}) {
+                Ok(json!({"status":"unbound","reason":"Turn lease is no longer active"}))
+            } else {
+                Err(RegistryError::Unauthorized)
+            };
+        }
         match query {
             Query::Whoami {} => {
                 let managed: i64 =

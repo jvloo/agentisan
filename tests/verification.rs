@@ -87,6 +87,33 @@ fn verifier(path: &std::path::Path, body: &str) {
 }
 
 #[tokio::test]
+async fn invalid_run_id_cannot_escape_verification_artifact_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let (_run, _token) = proposal(&data, "candidate", false).await;
+    let check = temp.path().join("unused.sh");
+    verifier(
+        &check,
+        "#!/bin/sh\nprintf '%s\\n' '{\"accepted\":true,\"summary\":\"unused\"}'\n",
+    );
+    let escaped = temp.path().join("escaped");
+    let output = Command::new(env!("CARGO_BIN_EXE_agentisan"))
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "runs",
+            "verify",
+            "../../escaped",
+            "--verifier",
+            check.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!escaped.exists());
+}
+
+#[tokio::test]
 async fn durable_proposal_remains_verifiable_after_native_failure() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("state");

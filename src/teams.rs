@@ -28,7 +28,7 @@ PRAGMA user_version=2;
 /// are claimed by the connector and acknowledged only by an atomic turn commit.
 pub const LEASE_SCHEMA: &str = "
 CREATE TABLE agent_epochs (agent_id TEXT PRIMARY KEY REFERENCES agents(id), epoch INTEGER NOT NULL);
-CREATE TABLE turn_leases (turn_id TEXT PRIMARY KEY REFERENCES turns(id), principal_id TEXT NOT NULL UNIQUE REFERENCES principals(id), agent_id TEXT NOT NULL REFERENCES agents(id), epoch INTEGER NOT NULL, state TEXT NOT NULL, expires_at INTEGER NOT NULL, commit_key TEXT, commit_request TEXT, commit_receipt TEXT);
+CREATE TABLE turn_leases (turn_id TEXT PRIMARY KEY REFERENCES turns(id), principal_id TEXT NOT NULL UNIQUE REFERENCES principals(id), agent_id TEXT NOT NULL REFERENCES agents(id), epoch INTEGER NOT NULL, state TEXT NOT NULL, expires_at INTEGER NOT NULL, observed_at INTEGER, commit_key TEXT, commit_request TEXT, commit_receipt TEXT);
 CREATE TABLE turn_inputs (turn_id TEXT NOT NULL REFERENCES turns(id), message_id TEXT NOT NULL REFERENCES messages(id), PRIMARY KEY(turn_id,message_id));
 CREATE TABLE run_proposals (run_id TEXT PRIMARY KEY REFERENCES runs(id), turn_id TEXT NOT NULL REFERENCES turns(id), agent_id TEXT NOT NULL REFERENCES agents(id), result TEXT NOT NULL, created_at INTEGER NOT NULL);
 ALTER TABLE messages ADD COLUMN staged_turn TEXT REFERENCES turns(id);
@@ -454,6 +454,8 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
         }
         Action::Receive { .. } => {
             let rows=sqlx::query("SELECT m.* FROM messages m JOIN turn_inputs i ON i.message_id=m.id WHERE i.turn_id=? ORDER BY m.seq").bind(&turn).fetch_all(&mut *tx).await?;
+            sqlx::query("UPDATE turn_leases SET observed_at=COALESCE(observed_at,?) WHERE turn_id=? AND state='active'")
+                .bind(now()).bind(&turn).execute(&mut *tx).await?;
             json!({"lease_id":turn,"ownership_epoch":lease.get::<i64,_>("epoch"),"messages":rows.iter().map(message_json).collect::<Vec<_>>()})
         }
         Action::Commit {
@@ -519,6 +521,18 @@ async fn commit_turn(
     request: &str,
     receipt: &Value,
 ) -> Result<()> {
+    let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM turn_inputs WHERE turn_id=?")
+        .bind(turn)
+        .fetch_one(&mut **tx)
+        .await?;
+    let observed: Option<i64> =
+        sqlx::query_scalar("SELECT observed_at FROM turn_leases WHERE turn_id=?")
+            .bind(turn)
+            .fetch_one(&mut **tx)
+            .await?;
+    if claimed > 0 && observed.is_none() {
+        bail!("turn inputs must be read before they can be committed");
+    }
     sqlx::query("UPDATE messages SET delivered_turn=? WHERE id IN (SELECT message_id FROM turn_inputs WHERE turn_id=?) AND delivered_turn IS NULL")
         .bind(turn).bind(turn).execute(&mut **tx).await?;
     sqlx::query("UPDATE messages SET staged_turn=NULL WHERE staged_turn=?")
@@ -530,15 +544,6 @@ async fn commit_turn(
     Ok(())
 }
 
-pub async fn record_binding(
-    registry: &Registry,
-    run_id: &str,
-    agent_id: &str,
-    native_id: &str,
-) -> Result<()> {
-    record_binding_owned(registry, run_id, agent_id, native_id, None).await
-}
-
 /// Runtime callbacks carry the exact dispatch identity, so a late process cannot
 /// attach a native session to a later turn of the same logical agent.
 pub async fn record_work_binding(registry: &Registry, work: &Work, native_id: &str) -> Result<()> {
@@ -547,7 +552,7 @@ pub async fn record_work_binding(registry: &Registry, work: &Work, native_id: &s
         &work.run_id,
         work.agent.id.as_str(),
         native_id,
-        Some(&work.turn_id),
+        &work.turn_id,
     )
     .await
 }
@@ -557,16 +562,15 @@ async fn record_binding_owned(
     run_id: &str,
     agent_id: &str,
     native_id: &str,
-    turn_id: Option<&str>,
+    turn_id: &str,
 ) -> Result<()> {
     uuid::Uuid::parse_str(native_id)?;
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     let active: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM turns t JOIN turn_leases l ON l.turn_id=t.id JOIN agent_epochs e ON e.agent_id=l.agent_id AND e.epoch=l.epoch WHERE t.run_id=? AND t.agent_id=? AND t.state='running' AND (? IS NULL OR t.id=?) AND l.state IN ('active','committed')",
+        "SELECT count(*) FROM turns t JOIN turn_leases l ON l.turn_id=t.id JOIN agent_epochs e ON e.agent_id=l.agent_id AND e.epoch=l.epoch WHERE t.run_id=? AND t.agent_id=? AND t.id=? AND t.state='running' AND l.state IN ('active','committed')",
     )
     .bind(run_id)
     .bind(agent_id)
-    .bind(turn_id)
     .bind(turn_id)
     .fetch_one(&mut *tx)
     .await?;
@@ -725,6 +729,16 @@ pub async fn finish(
     if owned != 1 {
         bail!("native completion belongs to a stale or settled turn");
     }
+    let lease_state: String = sqlx::query_scalar("SELECT state FROM turn_leases WHERE turn_id=?")
+        .bind(&work.turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if lease_state == "active" {
+        sqlx::query("DELETE FROM messages WHERE staged_turn=?")
+            .bind(&work.turn_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     match result {
         Ok(result) => {
             sqlx::query("UPDATE turns SET state='completed',ended_at=?,native_id=?,output=?,usage=?,artifacts=? WHERE id=?")
@@ -765,6 +779,9 @@ pub async fn finish(
 pub async fn recover_interrupted(registry: &Registry) -> Result<()> {
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE agent_epochs SET epoch=epoch+1")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM messages WHERE staged_turn IN (SELECT turn_id FROM turn_leases WHERE state='active')")
         .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE turn_leases SET state='fenced' WHERE state='active'")

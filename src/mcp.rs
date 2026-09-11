@@ -386,9 +386,9 @@ impl AgentServer {
     }
 
     #[tool(
-        description = "Read the messages claimed for your active turn without acknowledging processing. Repeated reads return the same snapshot. Do not poll.",
+        description = "Read the messages claimed for your active turn and record that the snapshot was presented, without acknowledging processing. Repeated reads return the same snapshot. Do not poll.",
         annotations(
-            read_only_hint = true,
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false

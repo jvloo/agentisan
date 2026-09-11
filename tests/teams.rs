@@ -273,11 +273,11 @@ async fn native_bindings_cannot_silently_change_on_resume() {
         .unwrap();
     assert_eq!(queued["activity"]["state"], "waiting");
     assert_eq!(queued["activity"]["run_state"], "queued");
-    teams::next(&r).await.unwrap().unwrap();
-    teams::record_binding(&r, &run, "lead", &id).await.unwrap();
-    teams::record_binding(&r, &run, "lead", &id).await.unwrap();
+    let work = teams::next(&r).await.unwrap().unwrap();
+    teams::record_work_binding(&r, &work, &id).await.unwrap();
+    teams::record_work_binding(&r, &work, &id).await.unwrap();
     assert!(
-        teams::record_binding(&r, &run, "lead", &uuid::Uuid::new_v4().to_string())
+        teams::record_work_binding(&r, &work, &uuid::Uuid::new_v4().to_string())
             .await
             .is_err()
     );
@@ -313,7 +313,7 @@ async fn inspected_resume_preserves_native_ids_and_original_limits() {
         .unwrap();
     let work = teams::next(&r).await.unwrap().unwrap();
     let native = uuid::Uuid::new_v4().to_string();
-    teams::record_binding(&r, &run, "lead", &native)
+    teams::record_work_binding(&r, &work, &native)
         .await
         .unwrap();
     // Successful but unproductive native turn: the message was never received.
@@ -483,7 +483,7 @@ async fn resuming_an_older_run_never_borrows_a_newer_runs_native_session() {
         let work = teams::next(&r).await.unwrap().unwrap();
         assert!(work.native_id.is_none());
         let native = uuid::Uuid::new_v4().to_string();
-        teams::record_binding(&r, &run, "lead", &native)
+        teams::record_work_binding(&r, &work, &native)
             .await
             .unwrap();
         teams::finish(
@@ -504,11 +504,11 @@ async fn resuming_an_older_run_never_borrows_a_newer_runs_native_session() {
     let resumed = teams::next(&r).await.unwrap().unwrap();
     assert_eq!(resumed.native_id.as_deref(), Some(history[0].1.as_str()));
     assert!(
-        teams::record_binding(&r, &history[0].0, "lead", &history[1].1)
+        teams::record_work_binding(&r, &resumed, &history[1].1)
             .await
             .is_err()
     );
-    teams::record_binding(&r, &history[0].0, "lead", &history[0].1)
+    teams::record_work_binding(&r, &resumed, &history[0].1)
         .await
         .unwrap();
     r.close().await;
@@ -563,6 +563,46 @@ async fn turn_lease_identity_is_scoped_below_observer_access() {
     ] {
         assert!(registry.inspect(Some(&lease), query).await.is_err());
     }
+    teams::act(
+        &registry,
+        &lease,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    teams::act(
+        &registry,
+        &lease,
+        Action::Commit {
+            run_id: run.clone(),
+            idempotency_key: "scope_commit".into(),
+        },
+    )
+    .await
+    .unwrap();
+    teams::finish(&registry, &work, Ok(native_success()))
+        .await
+        .unwrap();
+    assert_eq!(
+        registry
+            .inspect(Some(&lease), Query::Whoami {})
+            .await
+            .unwrap()["status"],
+        "unbound"
+    );
+    assert!(
+        registry
+            .inspect(
+                Some(&lease),
+                Query::AgentsInspect {
+                    agent_id: "lead".into()
+                }
+            )
+            .await
+            .is_err()
+    );
     registry.close().await;
 }
 
@@ -578,6 +618,18 @@ async fn lost_read_response_does_not_acknowledge_and_commit_publishes_atomically
         run_id: run.clone(),
     };
     assert!(teams::act(&r, &observers[0], read.clone()).await.is_err());
+    assert!(
+        teams::act(
+            &r,
+            &token,
+            Action::Commit {
+                run_id: run.clone(),
+                idempotency_key: "commit_before_read".into()
+            }
+        )
+        .await
+        .is_err()
+    );
     let first = teams::act(&r, &token, read.clone()).await.unwrap();
     let repeated = teams::act(&r, &token, read).await.unwrap();
     assert_eq!(
@@ -656,6 +708,7 @@ async fn successful_native_exit_without_commit_keeps_inputs_and_fences_old_lease
         run_id: run.clone(),
     };
     let inbox = teams::act(&r, &old, read.clone()).await.unwrap();
+    send(&r, &old, &run, "a", "retry_after_no_commit").await;
     teams::finish(&r, &first, Ok(native_success()))
         .await
         .unwrap();
@@ -682,6 +735,9 @@ async fn successful_native_exit_without_commit_keeps_inputs_and_fences_old_lease
     let next_inbox = teams::act(&r, &new, read.clone()).await.unwrap();
     assert_eq!(next_inbox["ownership_epoch"], 2);
     assert_eq!(next_inbox["messages"], inbox["messages"]);
+    let resent = send(&r, &new, &run, "a", "retry_after_no_commit").await;
+    assert_eq!(resent["status"], "staged");
+    commit(&r, &second).await;
     assert!(teams::act(&r, &old, read).await.is_err());
     assert!(
         teams::record_work_binding(&r, &first, &uuid::Uuid::new_v4().to_string())
@@ -739,6 +795,15 @@ async fn committed_proposal_survives_native_failure_and_service_restart() {
             .unwrap();
         let lead = teams::next(&r).await.unwrap().unwrap();
         let token = fixture::read_credential(&lead.credential_file).unwrap();
+        teams::act(
+            &r,
+            &token,
+            Action::Receive {
+                run_id: run.clone(),
+            },
+        )
+        .await
+        .unwrap();
         send(&r, &token, &run, "a", "assign_a").await;
         send(&r, &token, &run, "b", "assign_b").await;
         commit(&r, &lead).await;
@@ -748,6 +813,15 @@ async fn committed_proposal_survives_native_failure_and_service_restart() {
         for _ in 0..2 {
             let worker = teams::next(&r).await.unwrap().unwrap();
             let token = fixture::read_credential(&worker.credential_file).unwrap();
+            teams::act(
+                &r,
+                &token,
+                Action::Receive {
+                    run_id: run.clone(),
+                },
+            )
+            .await
+            .unwrap();
             send(&r, &token, &run, "lead", "report").await;
             commit(&r, &worker).await;
             teams::finish(&r, &worker, Ok(native_success()))
@@ -756,6 +830,15 @@ async fn committed_proposal_survives_native_failure_and_service_restart() {
         }
         let lead = teams::next(&r).await.unwrap().unwrap();
         let token = fixture::read_credential(&lead.credential_file).unwrap();
+        teams::act(
+            &r,
+            &token,
+            Action::Receive {
+                run_id: run.clone(),
+            },
+        )
+        .await
+        .unwrap();
         let action = Action::Complete {
             run_id: run.clone(),
             result: "Exact durable proposed bytes\n".into(),
@@ -848,6 +931,16 @@ async fn migration_preserves_v4_records_and_old_tokens_are_read_only() {
         .await
         .is_err()
     );
+    let lease = fixture::read_credential(&work.credential_file).unwrap();
+    teams::act(
+        &upgraded,
+        &lease,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(commit(&upgraded, &work).await["status"], "committed");
     upgraded.close().await;
 }
