@@ -165,7 +165,7 @@ async fn scheduler_database_failure_stops_service_and_fences_work() {
         .filename(&database)
         .foreign_keys(true);
     let mut damaged = SqliteConnection::connect_with(&options).await.unwrap();
-    sqlx::query("ALTER TABLE messages RENAME TO messages_broken")
+    sqlx::query("ALTER TABLE team_members RENAME TO team_members_broken")
         .execute(&mut damaged)
         .await
         .unwrap();

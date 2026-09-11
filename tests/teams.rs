@@ -47,6 +47,41 @@ async fn setup() -> (tempfile::TempDir, Registry, Vec<String>) {
         .collect();
     (temp, registry, tokens)
 }
+
+#[tokio::test]
+async fn broker_sender_names_are_reserved_from_agent_ids() {
+    for reserved in ["human", "system", "agentisan"] {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("state");
+        let registry = Registry::open(&fixture::database_path(&data).unwrap())
+            .await
+            .unwrap();
+        let config = TeamConfig {
+            group: Group {
+                id: "reserved_group".into(),
+                name: "Reserved".into(),
+            },
+            team: Team {
+                id: "reserved_team".into(),
+                group_id: "reserved_group".into(),
+                name: "Reserved".into(),
+            },
+            agents: vec![MemberConfig {
+                id: reserved.into(),
+                name: "Reserved".into(),
+                role: AgentRole::Lead,
+                provider: Provider::Claude,
+                executable: std::env::current_exe().unwrap(),
+                model: "test".into(),
+                effort: "low".into(),
+                instructions: String::new(),
+            }],
+        };
+        assert!(teams::create(&registry, &data, &config).await.is_err());
+        registry.close().await;
+    }
+}
+
 async fn send(registry: &Registry, token: &str, run: &str, to: &str, key: &str) -> Value {
     teams::act(
         registry,
@@ -100,6 +135,18 @@ async fn work_act(r: &Registry, work: &teams::Work, action: Action) -> anyhow::R
     .await
 }
 
+async fn read_work(r: &Registry, work: &teams::Work) -> Value {
+    work_act(
+        r,
+        work,
+        Action::Receive {
+            run_id: work.run_id.clone(),
+        },
+    )
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn first_class_assignment_commits_atomically_and_only_assigned_work_blocks_completion() {
     let (_temp, r, t) = setup().await;
@@ -107,6 +154,7 @@ async fn first_class_assignment_commits_atomically_and_only_assigned_work_blocks
         .await
         .unwrap();
     let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
     let args = assignment_args(&run);
     let staged = work_act(&r, &lead, Action::AssignmentCreate(args.clone()))
         .await
@@ -207,6 +255,7 @@ async fn first_class_assignment_commits_atomically_and_only_assigned_work_blocks
         .await
         .unwrap();
     let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
     assert!(
         work_act(
             &r,
@@ -244,10 +293,9 @@ async fn first_class_assignment_commits_atomically_and_only_assigned_work_blocks
     teams::finish(&r, &lead, Ok(native_success()))
         .await
         .unwrap();
-    assert_eq!(
-        teams::inspect_run(&r, &t[0], &run).await.unwrap()["state"],
-        "completed"
-    );
+    let inspected = teams::inspect_run(&r, &t[0], &run).await.unwrap();
+    assert_eq!(inspected["state"], "completed");
+    assert_eq!(inspected["work"]["assignments"][0]["state"], "closed");
 }
 
 #[tokio::test]
@@ -257,10 +305,18 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
         .await
         .unwrap();
     let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
     let assignment = work_act(&r, &lead, Action::AssignmentCreate(assignment_args(&run)))
         .await
         .unwrap();
     let assignment_id = assignment["assignment_id"].as_str().unwrap().to_owned();
+    let mut other = assignment_args(&run);
+    other.assignee = "b".into();
+    other.scope_hash = "c".repeat(64);
+    other.idempotency_key = "assign_b".into();
+    work_act(&r, &lead, Action::AssignmentCreate(other))
+        .await
+        .unwrap();
     let args = agentisan::assignments::DecisionArgs {
         run_id: run.clone(),
         assignment_id: Some(assignment_id),
@@ -298,9 +354,24 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
     teams::finish(&r, &lead, Ok(native_success()))
         .await
         .unwrap();
+    let unblocked = teams::next(&r).await.unwrap().unwrap();
+    assert_eq!(unblocked.agent.id.as_str(), "b");
+    work_act(
+        &r,
+        &unblocked,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    commit(&r, &unblocked).await;
+    teams::finish(&r, &unblocked, Ok(native_success()))
+        .await
+        .unwrap();
     assert!(
         teams::next(&r).await.unwrap().is_none(),
-        "blocking human decision stops dispatch"
+        "blocking human decision stops only its assigned worker"
     );
     assert!(
         agentisan::assignments::resolve_decision(
@@ -377,6 +448,7 @@ async fn assignments_reserve_and_enforce_slices_and_failed_turn_never_publishes(
         .await
         .unwrap();
     let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
     let mut args = assignment_args(&run);
     args.turn_budget = 20;
     assert!(
@@ -1229,6 +1301,80 @@ async fn committed_proposal_survives_native_failure_and_service_restart() {
         }
         r.close().await;
     }
+}
+
+#[tokio::test]
+async fn inspected_no_effect_reconciliation_restores_original_work() {
+    let (_temp, registry, observers) = setup().await;
+    let run = teams::start(&registry, "team", "Recover me", 6, 12, 120, 20)
+        .await
+        .unwrap();
+    let first = teams::next(&registry).await.unwrap().unwrap();
+    let old = fixture::read_credential(&first.credential_file).unwrap();
+    let native = uuid::Uuid::new_v4().to_string();
+    teams::record_work_binding(&registry, &first, &native)
+        .await
+        .unwrap();
+    let original = teams::act(
+        &registry,
+        &old,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    send(&registry, &old, &run, "a", "discard_on_reconcile").await;
+    teams::recover_interrupted(&registry).await.unwrap();
+    let interrupted = teams::inspect_run(&registry, &observers[0], &run)
+        .await
+        .unwrap();
+    assert_eq!(interrupted["state"], "interrupted");
+    assert_eq!(interrupted["turns"][0]["state"], "unknown");
+    assert!(
+        teams::act(
+            &registry,
+            &old,
+            Action::Receive {
+                run_id: run.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    let reconciled = teams::reconcile_no_effect(&registry, &first.turn_id)
+        .await
+        .unwrap();
+    assert_eq!(reconciled["run_state"], "stalled");
+    assert!(
+        teams::reconcile_no_effect(&registry, &first.turn_id)
+            .await
+            .is_err()
+    );
+    teams::resume(&registry, &run).await.unwrap();
+    let resumed = teams::next(&registry).await.unwrap().unwrap();
+    assert_eq!(resumed.native_id.as_deref(), Some(native.as_str()));
+    let fresh = fixture::read_credential(&resumed.credential_file).unwrap();
+    let redelivered = teams::act(
+        &registry,
+        &fresh,
+        Action::Receive {
+            run_id: run.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(redelivered["messages"], original["messages"]);
+    assert_eq!(
+        teams::messages(&registry, &observers[0], &run)
+            .await
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    registry.close().await;
 }
 
 #[tokio::test]

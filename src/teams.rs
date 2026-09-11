@@ -141,6 +141,10 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn reserved_agent_id(id: &str) -> bool {
+    matches!(id, "human" | "system" | "agentisan")
+}
+
 pub async fn create(registry: &Registry, data_dir: &Path, config: &TeamConfig) -> Result<Value> {
     let _admin_lock = crate::fixture::admin_lock(data_dir)?;
     if !valid_id(config.group.id.as_str())
@@ -168,6 +172,7 @@ pub async fn create(registry: &Registry, data_dir: &Path, config: &TeamConfig) -
     let mut unique = std::collections::HashSet::new();
     for a in &config.agents {
         if !valid_id(a.id.as_str())
+            || reserved_agent_id(a.id.as_str())
             || !unique.insert(a.id.as_str())
             || a.name.trim().is_empty()
             || a.name.len() > 256
@@ -329,13 +334,14 @@ pub async fn inspect_run(
     .await?;
     let verification = crate::verification::inspect(registry, id).await?;
     let proposal=sqlx::query("SELECT turn_id,agent_id,result,created_at FROM run_proposals WHERE run_id=?").bind(id).fetch_optional(&registry.pool).await?.map(|r|json!({"turn_id":r.get::<String,_>("turn_id"),"agent_id":r.get::<String,_>("agent_id"),"result":r.get::<String,_>("result"),"created_at":r.get::<i64,_>("created_at")}));
+    let work = crate::assignments::inspect_run(registry, id).await?;
     let acceptance = match verification["state"].as_str() {
         Some("accepted") => "accepted",
         Some("rejected") => "rejected",
         _ => "not_independently_verified",
     };
     Ok(
-        json!({"id":id,"team_id":row.get::<String,_>("team_id"),"state":run_state,"result":row.get::<Option<String>,_>("result"),"proposal":proposal,"error":row.get::<Option<String>,_>("error"),"turn_count":row.get::<i64,_>("turns"),"max_turns":row.get::<i64,_>("max_turns"),"deadline":row.get::<i64,_>("deadline"),"message_count":message_count,"pending_message_count":pending_message_count,"activity":activity,"turns":data,"acceptance":acceptance,"verification":verification}),
+        json!({"id":id,"team_id":row.get::<String,_>("team_id"),"state":run_state,"result":row.get::<Option<String>,_>("result"),"proposal":proposal,"work":work,"error":row.get::<Option<String>,_>("error"),"turn_count":row.get::<i64,_>("turns"),"max_turns":row.get::<i64,_>("max_turns"),"deadline":row.get::<i64,_>("deadline"),"message_count":message_count,"pending_message_count":pending_message_count,"activity":activity,"turns":data,"acceptance":acceptance,"verification":verification}),
     )
 }
 
@@ -646,7 +652,7 @@ async fn record_binding_owned(
 pub async fn next(registry: &Registry) -> Result<Option<Work>> {
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE runs SET state='exhausted',error='run deadline reached' WHERE state IN ('queued','running') AND deadline<=?").bind(now()).execute(&mut *tx).await?;
-    let row=sqlx::query("SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload FROM runs r JOIN messages m ON m.run_id=r.id JOIN team_members tm ON tm.agent_id=m.recipient JOIN agents a ON a.id=tm.agent_id WHERE r.state IN ('queued','running') AND m.delivered_turn IS NULL AND m.staged_turn IS NULL AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.run_id=r.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1) ORDER BY m.seq LIMIT 1").fetch_optional(&mut *tx).await?;
+    let row=sqlx::query("SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload FROM runs r JOIN messages m ON m.run_id=r.id JOIN team_members tm ON tm.agent_id=m.recipient JOIN agents a ON a.id=tm.agent_id WHERE r.state IN ('queued','running') AND m.delivered_turn IS NULL AND m.staged_turn IS NULL AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d LEFT JOIN assignments da ON da.id=d.assignment_id WHERE d.run_id=r.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1 AND (d.assignment_id IS NULL OR da.assignee=m.recipient)) ORDER BY m.seq LIMIT 1").fetch_optional(&mut *tx).await?;
     let Some(row) = row else {
         sqlx::query("UPDATE runs SET state='stalled',error='no pending messages and lead has not completed' WHERE state='running' AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.run_id=runs.id AND m.delivered_turn IS NULL AND m.staged_turn IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.run_id=runs.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1)").execute(&mut *tx).await?;
         tx.commit().await?;
@@ -777,6 +783,7 @@ pub async fn finish(
         .fetch_one(&mut *tx)
         .await?;
     if lease_state == "active" {
+        crate::assignments::discard(&mut tx, &work.turn_id).await?;
         sqlx::query("DELETE FROM messages WHERE staged_turn=?")
             .bind(&work.turn_id)
             .execute(&mut *tx)
@@ -824,9 +831,17 @@ pub async fn recover_interrupted(registry: &Registry) -> Result<()> {
     sqlx::query("UPDATE agent_epochs SET epoch=epoch+1")
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM messages WHERE staged_turn IN (SELECT turn_id FROM turn_leases WHERE state='active')")
-        .execute(&mut *tx)
-        .await?;
+    let active: Vec<String> =
+        sqlx::query_scalar("SELECT turn_id FROM turn_leases WHERE state='active'")
+            .fetch_all(&mut *tx)
+            .await?;
+    for turn in active {
+        crate::assignments::discard(&mut tx, &turn).await?;
+        sqlx::query("DELETE FROM messages WHERE staged_turn=?")
+            .bind(&turn)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("UPDATE turn_leases SET state='fenced' WHERE state='active'")
         .execute(&mut *tx)
         .await?;
@@ -834,6 +849,44 @@ pub async fn recover_interrupted(registry: &Registry) -> Result<()> {
     sqlx::query("UPDATE turns SET state='unknown',error='service restarted before completion receipt' WHERE state='running'").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Trusted administrative reconciliation. The caller has inspected the native
+/// transcript/artifacts and asserts that the unknown turn produced no effect.
+/// Work is not replayed here; the run returns to `stalled` and still requires
+/// the existing explicit resume operation.
+pub async fn reconcile_no_effect(registry: &Registry, turn_id: &str) -> Result<Value> {
+    if !valid_id(turn_id) {
+        bail!("invalid turn identity");
+    }
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let row=sqlx::query("SELECT t.run_id,r.state AS run_state,r.deadline,r.turns,r.max_turns FROM turns t JOIN runs r ON r.id=t.run_id JOIN turn_leases l ON l.turn_id=t.id WHERE t.id=? AND t.state='unknown' AND r.state='interrupted' AND l.state='fenced'").bind(turn_id).fetch_optional(&mut *tx).await?.ok_or_else(||anyhow::anyhow!("unknown turn is not available for no-effect reconciliation"))?;
+    crate::assignments::discard(&mut tx, turn_id).await?;
+    sqlx::query("DELETE FROM messages WHERE staged_turn=?")
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE turns SET state='reconciled_no_effect',ended_at=COALESCE(ended_at,?),error='administrator confirmed no effect after inspection' WHERE id=?")
+        .bind(now()).bind(turn_id).execute(&mut *tx).await?;
+    let run_id: String = row.get("run_id");
+    let pending:i64=sqlx::query_scalar("SELECT count(*) FROM messages WHERE run_id=? AND delivered_turn IS NULL AND staged_turn IS NULL").bind(&run_id).fetch_one(&mut *tx).await?;
+    let resumable = pending > 0
+        && row.get::<i64, _>("deadline") > now()
+        && row.get::<i64, _>("turns") < row.get::<i64, _>("max_turns");
+    sqlx::query("UPDATE runs SET state=?,error=? WHERE id=?")
+        .bind(if resumable { "stalled" } else { "failed" })
+        .bind(if resumable {
+            "unknown turn reconciled as no effect; explicit inspected resume required"
+        } else {
+            "unknown turn reconciled but original run limits do not permit resume"
+        })
+        .bind(&run_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(
+        json!({"turn_id":turn_id,"run_id":run_id,"outcome":"no_effect","run_state":if resumable{"stalled"}else{"failed"},"resumable":resumable}),
+    )
 }
 
 /// Administrative continuation after inspection. Never resets budgets or replays a
@@ -851,8 +904,9 @@ pub async fn resume(registry: &Registry, id: &str) -> Result<()> {
     {
         bail!("only stalled runs with remaining original limits can resume");
     }
-    let uncertain: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM turns WHERE run_id=? AND state!='completed'")
+    let uncertain: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turns WHERE run_id=? AND state NOT IN ('completed','reconciled_no_effect')",
+    )
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;

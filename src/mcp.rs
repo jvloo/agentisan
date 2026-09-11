@@ -556,7 +556,7 @@ impl ServerHandler for AgentServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Agentisan agent profile. Identity and sender come from the per-turn lease credential; every action is restricted to its assigned active run and ownership epoch. Read the inbox once, do available work, stage bounded messages, then call turn_commit before ending the native turn. Only the lead may call result_propose; a successful proposal commits that lead turn automatically. Proposal is separate from acceptance. This profile cannot inspect groups, enumerate teams, read the full timeline, alter permissions, approve decisions, or execute commands.")
+            .with_instructions("Agentisan agent profile. Identity and sender come from the per-turn lease credential; every action is restricted to its assigned active run and ownership epoch. Read the inbox once. Leads create bounded assignments; assignees report them and leads close them. A decision_request asks a human but never grants approval. Stage bounded peer messages and work updates, then call turn_commit before ending the native turn. Only the lead may call result_propose; a successful proposal commits that lead turn automatically. Proposal is separate from acceptance. This profile cannot inspect groups, enumerate teams, read the full timeline, alter permissions, resolve decisions, or execute commands.")
     }
 }
 

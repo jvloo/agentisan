@@ -1,7 +1,7 @@
 //! First-class work and human decisions. Model operations are staged under a turn
 //! lease; only the turn transaction publishes them. Admin functions are not MCP tools.
 use crate::{
-    registry::Registry,
+    registry::{Registry, RegistryError},
     teams::{new_id, now},
 };
 use anyhow::{Result, bail};
@@ -209,6 +209,18 @@ pub(crate) async fn inbox_context(
     Ok(
         json!({"assignments":assignments.iter().map(|r|json!({"id":r.get::<String,_>("id"),"assignee":r.get::<String,_>("assignee"),"state":r.get::<String,_>("state"),"objective":r.get::<String,_>("objective"),"scope_hash":r.get::<String,_>("scope_hash"),"deadline":r.get::<i64,_>("deadline"),"remaining_turns":r.get::<i64,_>("turn_budget")-r.get::<i64,_>("turns_used"),"remaining_messages":r.get::<i64,_>("message_budget")-r.get::<i64,_>("messages_used")})).collect::<Vec<_>>(),"decisions":decisions.iter().map(|r|json!({"id":r.get::<String,_>("id"),"state":r.get::<String,_>("state"),"question":r.get::<String,_>("question"),"scope_hash":r.get::<String,_>("scope_hash"),"artifact_hash":r.get::<String,_>("artifact_hash"),"resolution":r.get::<Option<String>,_>("resolution")})).collect::<Vec<_>>()}),
     )
+}
+
+pub(crate) async fn inspect_run(
+    registry: &Registry,
+    run: &str,
+) -> std::result::Result<Value, RegistryError> {
+    let assignments=sqlx::query("SELECT id,creator,assignee,parent_id,state,objective,done_criteria,scope_hash,deadline,turn_budget,message_budget,turns_used,messages_used,created_at FROM assignments WHERE run_id=? AND staged_turn IS NULL ORDER BY created_at,id LIMIT 128").bind(run).fetch_all(&registry.pool).await?;
+    let decisions=sqlx::query("SELECT id,assignment_id,requester,state,question,scope_hash,artifact_hash,options,blocking,resolution,resolved_by,resolved_at,created_at FROM decisions WHERE run_id=? AND staged_turn IS NULL ORDER BY created_at,id LIMIT 128").bind(run).fetch_all(&registry.pool).await?;
+    Ok(json!({
+        "assignments":assignments.iter().map(|r|json!({"id":r.get::<String,_>("id"),"creator":r.get::<String,_>("creator"),"assignee":r.get::<String,_>("assignee"),"parent_id":r.get::<Option<String>,_>("parent_id"),"state":r.get::<String,_>("state"),"objective":r.get::<String,_>("objective"),"done_criteria":serde_json::from_str::<Value>(&r.get::<String,_>("done_criteria")).unwrap_or(Value::Null),"scope_hash":r.get::<String,_>("scope_hash"),"deadline":r.get::<i64,_>("deadline"),"turn_budget":r.get::<i64,_>("turn_budget"),"message_budget":r.get::<i64,_>("message_budget"),"turns_used":r.get::<i64,_>("turns_used"),"messages_used":r.get::<i64,_>("messages_used"),"created_at":r.get::<i64,_>("created_at")})).collect::<Vec<_>>(),
+        "decisions":decisions.iter().map(|r|json!({"id":r.get::<String,_>("id"),"assignment_id":r.get::<Option<String>,_>("assignment_id"),"requester":r.get::<String,_>("requester"),"state":r.get::<String,_>("state"),"question":r.get::<String,_>("question"),"scope_hash":r.get::<String,_>("scope_hash"),"artifact_hash":r.get::<String,_>("artifact_hash"),"options":serde_json::from_str::<Value>(&r.get::<String,_>("options")).unwrap_or(Value::Null),"blocking":r.get::<bool,_>("blocking"),"resolution":r.get::<Option<String>,_>("resolution"),"resolved_by":r.get::<Option<String>,_>("resolved_by"),"resolved_at":r.get::<Option<i64>,_>("resolved_at"),"created_at":r.get::<i64,_>("created_at")})).collect::<Vec<_>>()
+    }))
 }
 
 pub(crate) async fn create(
@@ -442,6 +454,30 @@ pub(crate) async fn publish(tx: &mut Transaction<'_, Sqlite>, turn: &str) -> Res
     Ok(())
 }
 
+/// Discard internal operations that never reached `turn_commit`. None of these
+/// rows were visible to recipients, so removal is reconciliation rather than a
+/// replay of an uncertain external effect.
+pub(crate) async fn discard(tx: &mut Transaction<'_, Sqlite>, turn: &str) -> Result<()> {
+    sqlx::query("UPDATE assignments SET messages_used=MAX(0,messages_used-(SELECT count(*) FROM messages m WHERE m.staged_turn=? AND m.run_id=assignments.run_id AND m.sender=assignments.assignee)) WHERE run_id=(SELECT run_id FROM turns WHERE id=?)")
+        .bind(turn)
+        .bind(turn)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM decisions WHERE staged_turn=?")
+        .bind(turn)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM work_operations WHERE turn_id=? AND published=0")
+        .bind(turn)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM assignments WHERE staged_turn=?")
+        .bind(turn)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Trusted administrator entry point. Caller authenticates the human before calling;
 /// no model credential or model-supplied claim of approval is accepted here.
 pub async fn resolve_decision(
@@ -505,4 +541,15 @@ pub async fn invalidate_decision(registry: &Registry, id: &str) -> Result<()> {
         bail!("decision not available for invalidation");
     }
     Ok(())
+}
+
+pub async fn inspect_decision(registry: &Registry, id: &str) -> Result<Value> {
+    let row = sqlx::query("SELECT id,run_id,assignment_id,requester,state,question,scope_hash,artifact_hash,options,blocking,resolution,resolved_by,resolved_at,created_at FROM decisions WHERE id=? AND staged_turn IS NULL")
+        .bind(id)
+        .fetch_optional(&registry.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("decision not found"))?;
+    Ok(
+        json!({"id":row.get::<String,_>("id"),"run_id":row.get::<String,_>("run_id"),"assignment_id":row.get::<Option<String>,_>("assignment_id"),"requester":row.get::<String,_>("requester"),"state":row.get::<String,_>("state"),"question":row.get::<String,_>("question"),"scope_hash":row.get::<String,_>("scope_hash"),"artifact_hash":row.get::<String,_>("artifact_hash"),"options":serde_json::from_str::<Value>(&row.get::<String,_>("options"))?,"blocking":row.get::<bool,_>("blocking"),"resolution":row.get::<Option<String>,_>("resolution"),"resolved_by":row.get::<Option<String>,_>("resolved_by"),"resolved_at":row.get::<Option<i64>,_>("resolved_at"),"created_at":row.get::<i64,_>("created_at")}),
+    )
 }
