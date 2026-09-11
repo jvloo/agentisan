@@ -1,17 +1,19 @@
 # Agentisan
 
-**Agent teams, with receipts.**
+**Craft agents into a team.**
 
-Agentisan is a local Rust runtime and MCP server for durable, bounded collaboration between
-Claude Code and Codex CLI agents. One service-owned lead delegates to multiple workers; workers can
-exchange scoped messages directly; Agentisan persists identity, assignments, turn commits, human
-decisions, recovery state, and result verification in SQLite.
+Agentisan is a local Rust runtime and MCP server for durable, bounded agent collaboration. Its
+coordination model is provider-agnostic: Agentisan owns canonical identity, assignments, messages,
+turn commits, human decisions, recovery state, and result verification instead of delegating those
+contracts to a model provider.
 
-**Current implementation: core-v2.** It runs real Claude-led/Codex-worker teams and the reverse on
-macOS/Linux. Existing CLIs retain their native sessions, Agentisan's CLI and observer MCP profile
-inspect authoritative runtime state, and completed Codex sessions remain readable in Codex
-Desktop. The current worker profile supports consultation, planning, and review; it deliberately
-disables shell commands, file editing, native delegation, external apps, and unrelated MCP tools.
+**Current adapters: Claude Code and Codex CLI.** Core-v2 runs a Claude lead with Codex workers or a
+Codex lead with Claude workers on macOS/Linux. One service-owned lead delegates to multiple workers,
+and workers exchange scoped messages directly. Existing CLIs retain their native sessions;
+Agentisan's CLI and observer MCP profile inspect authoritative runtime state; completed Codex
+sessions remain readable in Codex Desktop. The current worker profile supports consultation,
+planning, and review, with shell commands, file editing, native delegation, external apps, and
+unrelated MCP tools disabled.
 
 Start with the [live-team guide](docs/live-teams.md) and either the
 [Claude-led](examples/claude-led-team.json) or [Codex-led](examples/codex-led-team.json)
@@ -21,7 +23,8 @@ configuration. The fixture walkthrough below exercises inspection without model 
 
 | Capability | Current behavior |
 |---|---|
-| Cross-provider teams | A Claude lead can coordinate Codex workers, or a Codex lead can coordinate Claude workers. Workers can message each other through MCP. |
+| Provider-agnostic coordination | Agentisan owns team identity, work, communication, commit, recovery, and acceptance records independently of provider-native session formats. |
+| Current provider adapters | A Claude lead can coordinate Codex workers, or a Codex lead can coordinate Claude workers. Workers can message each other through MCP. |
 | Durable turns | Short-lived credentials bind every mutation to one agent, run, turn, and ownership epoch. The first inbox read persists a stable snapshot; `turn_commit` atomically acknowledges inputs and publishes staged work. |
 | Bounded delegation | Assignments reserve turn and message slices inside immutable run limits. Exhausted assignments do not starve independent work, and inspected extensions cannot enlarge the root budget. |
 | Human decisions | Agents can request a choice against exact scope and artifact hashes. Only the trusted local CLI can resolve or invalidate it; a blocking request pauses its dependent assignment. |
@@ -40,8 +43,8 @@ required lead/worker/peer routes, and three distinct durable native sessions. Se
 - Current managed workers cannot execute shell commands or edit project files.
 - Codex Desktop is a verified transcript inspection surface, not an authenticated active-writer
   adapter; Claude Desktop integration is not shipped.
-- Direct model APIs, Windows CLI supervision, native approval UI, URI/deep-link handlers,
-  concurrent native turns, and general effect reconciliation are not shipped.
+- Additional provider adapters, direct model APIs, Windows CLI supervision, native approval UI,
+  URI/deep-link handlers, concurrent native turns, and general effect reconciliation are not shipped.
 
 ## Run a real team
 
