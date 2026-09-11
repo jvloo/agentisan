@@ -348,6 +348,7 @@ mod unix {
             let limit=turn_deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(seconds_left(&work)?));
             if limit.is_zero() {bail!("turn deadline reached during preflight");}
             let deadline=Instant::now()+limit;
+            let prompt=format!("{prompt}\nDelivery protocol: messages_receive only reads the inputs claimed for this turn. messages_send stages outgoing messages. After processing all received inputs, call turn_commit with this run_id and a unique idempotency_key before ending the turn. turn_commit atomically acknowledges those inputs and publishes your staged messages. A successful runs_complete already commits the lead's inputs and proposal; do not call turn_commit afterward. Never claim a message was delivered before commit succeeds. A failed completion attempt does not commit: call turn_commit then end your turn.");
             let exit_file=artifacts.join("native-exit.json");
             let mut command=Command::new(host_executable);
             command.arg("worker-host").arg("--exit-file").arg(&exit_file).arg("--timeout-ms").arg(limit.as_millis().max(1).to_string()).arg("--").arg(&work.agent.executable).args(args).current_dir(&workspace).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -378,7 +379,7 @@ mod unix {
                     let partial=fs::read_to_string(&stdout_path).unwrap_or_default();
                     if let Some(id)=cli_protocol::initial_native_id(&work.agent.provider,&partial) {
                         if expected.is_some_and(|s|s!=id) {bail!("native session differs from the exact requested session");}
-                        teams::record_binding(&registry,&work.run_id,work.agent.id.as_str(),&id).await?;
+                        teams::record_work_binding(&registry,&work,&id).await?;
                         observed=Some(id);
                     }
                 }
@@ -406,7 +407,7 @@ mod unix {
             if exit["success"]!=true {bail!("CLI exited unsuccessfully; inspect private stderr artifact");}
             let stdout=fs::read_to_string(&stdout_path)?;
             let parsed=cli_protocol::parse(&work.agent.provider,&stdout,expected)?;
-            teams::record_binding(&registry,&work.run_id,work.agent.id.as_str(),&parsed.native_id).await?;
+            teams::record_work_binding(&registry,&work,&parsed.native_id).await?;
             store(&artifacts.join("metadata.json"),&json!({"status":"completed","native_id":parsed.native_id,"provider":work.agent.provider.as_str(),"requested_model":work.agent.model,"requested_effort":work.agent.effort,"cli_version":version,"duration_seconds":started.elapsed().as_secs_f64(),"usage":parsed.usage,"stdout":"stdout.jsonl","stderr":"stderr.txt"}))?;
             Ok::<_,anyhow::Error>(TurnResult{native_id:parsed.native_id,output:parsed.output,usage:parsed.usage,artifacts:artifacts.clone()})
         }.await;
