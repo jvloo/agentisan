@@ -18,7 +18,7 @@ remains available as an explicit `autonomous` mode for unattended jobs.
 | Concern | Core-v2 | V3 default |
 |---|---|---|
 | Coordinator | Service launches another model lead. | The developer's existing main chat coordinates. |
-| MCP surface | Agent, observer, and per-team controller profiles. | One generic Agentisan server with five tools. |
+| MCP surface | Agent, observer, and per-team controller profiles. | One generic Agentisan server with four tools. |
 | Team definition | Static JSON with a required managed lead. | Dynamic run roster with optional reusable templates. |
 | Startup | Manual service, port, credential path, and host configuration. | One-time integration plus an OS-managed daemon. |
 | Progress | Repeated inspect/watch commands. | Cursor-based bounded wait returning meaningful changes. |
@@ -137,22 +137,28 @@ controller lease, roster, initial work items, budget envelope, and receipts. Wor
 exchange messages while the controller is disconnected. Work that requires new controller input
 waits durably instead of spawning another coordinator.
 
-The controller lease provides one writer at a time. It is evidence of an Agentisan MCP/CLI connection
-holding the operator credential, not evidence of a particular provider-native chat. Every mutation
-checks the run, controller epoch, and lease expiry. A new connector can inspect the run; it can mutate
-only after an explicit handoff or an inspected claim after expiry.
+The controller lease provides one writer at a time. It is evidence of a scoped Agentisan control
+capability, not evidence of a particular provider-native chat. `team_start` mints an unguessable
+per-run control handle, stores only its hash, and returns it only in the initiating tool result. Every
+mutation requires that handle and checks the run, controller epoch, connector instance, expected run
+version, and lease expiry.
 
-Each thin connector generates an unguessable instance ID at startup and authenticates to the daemon
-with the local operator credential. The daemon binds the controller lease to that instance without
-returning a bearer secret to the model. If a host shares one connector process among several chats,
-those chats necessarily share connector-level authority; Agentisan reports that limitation and never
-labels it per-chat identity. Optimistic run versions prevent silent lost updates even inside one
-connector boundary.
+The handle is derived from a daemon master key, the unguessable run ID, and capability epoch. The
+master key remains in an owner-only keystore; SQLite stores the capability hash and epoch. This lets
+the daemon reproduce the same handle for an exact authorized start retry without storing plaintext.
+Rotation increments the capability epoch and invalidates the old handle.
 
-The lease is renewed only by status or mutation calls and expires after a short idle period. A new
-connector uses `team_update` with `claim_control` after inspecting the current state and only when the
-old lease expired or supplied an explicit handoff receipt. Claiming increments the coordination epoch
-and fences stale writes. There is no “latest chat wins” rule.
+Each thin connector also generates an instance ID at startup and authenticates to the daemon with the
+local operator credential. A host may share that connector process among several chats, so the
+connector ID alone never authorizes run mutation. Another chat cannot control a run merely because it
+shares the operator credential; it must also possess that run's control handle. Optimistic run
+versions then prevent silent lost updates among holders of the same delegated capability.
+
+Read-only status calls never acquire or renew control. An accepted mutation renews the short lease and
+binds it to that connector instance. After expiry, the same control handle can acquire a new lease and
+increment the coordination epoch; stale connector writes remain fenced. Transfer to a chat that lacks
+the handle requires an explicit handoff from the current holder or a trusted CLI/dashboard recovery
+operation after inspection. There is no “latest chat wins” rule.
 
 ### Autonomous mode — explicit
 
@@ -190,22 +196,38 @@ interactive controller has a durable mailbox but is never scheduled as a native 
 stateDiagram-v2
     [*] --> starting
     starting --> running
+    starting --> failed
+    starting --> cancelled
+    starting --> interrupted
     running --> waiting_for_controller
     running --> waiting_for_human
     waiting_for_controller --> running
     waiting_for_human --> running
+    waiting_for_controller --> failed
+    waiting_for_controller --> cancelled
+    waiting_for_human --> failed
+    waiting_for_human --> cancelled
     running --> completing
     completing --> completed
+    completing --> failed
+    completing --> cancelled
+    completing --> interrupted
     running --> failed
     running --> cancelled
     running --> interrupted
     interrupted --> running: inspected recovery
+    interrupted --> cancelled: reconciled stop
     interrupted --> failed
 ```
 
-Terminal states are `completed`, `failed`, and `cancelled`. `interrupted` records uncertain native
-effects and never triggers automatic replay. `waiting_for_controller` and `waiting_for_human` are
-durable, non-busy states.
+Terminal states are `completed`, `failed`, and `cancelled`. Cancellation and failure are defined from
+every ordinary nonterminal state. `interrupted` records uncertain native effects and never triggers
+automatic replay; it can become cancelled only after the uncertain effect is reconciled. The waiting
+states are durable and non-busy.
+
+A run enters a waiting state only when it has no active native effect. Independent work may continue
+while one work item needs input, in which case the run remains `running` and exposes the blocked item
+through `team_status`.
 
 ### Work-item lifecycle
 
@@ -227,15 +249,14 @@ controller connection identity and provider-native chat identity.
 |---|---|---|
 | `team_start` | Atomically create an interactive or autonomous run and return immediately. | write, idempotent, open-world |
 | `team_status` | Inspect immediately or wait after an opaque cursor for meaningful changes. | read-only |
-| `team_update` | Assign work, send a message, accept/reject work, answer a decision, or finish within the existing run envelope. | write, idempotent |
-| `team_expand` | Increase root time, work, message, or provider allowance after showing the delta. | write, idempotent, open-world |
+| `team_update` | Assign work, send a message, accept/reject work, or finish within the existing run envelope. | write, idempotent |
 | `team_cancel` | Request bounded cancellation and record confirmed versus uncertain stop. | destructive |
 
 The default prompt path usually needs only `team_start`, `team_status`, and `team_update`. A
 discriminated `team_update.action` union keeps related in-envelope mutations behind one tool while
-retaining strict variant schemas and unknown-field rejection. Expansion and cancellation stay
-separate because their approval and risk semantics differ. Native opening belongs to the CLI,
-dashboard, or a host-specific UI adapter rather than the core model-facing catalog.
+retaining strict variant schemas and unknown-field rejection. Budget expansion and trusted human
+decisions stay outside the generic model-facing catalog. Native opening belongs to the CLI, dashboard,
+or a host-specific UI adapter.
 
 ### `team_start`
 
@@ -310,6 +331,7 @@ A successful start returns a compact receipt:
   "cursor": "opaque-cursor",
   "controller_identity": "agentisan_connector",
   "native_chat_identity": "not_asserted",
+  "control_handle": "opaque-per-run-capability",
   "workers": [
     {"key": "reliability", "provider": "claude", "model": "resolved-model"},
     {"key": "developer_experience", "provider": "codex", "model": "resolved-model"}
@@ -356,6 +378,7 @@ controller lease.
 ```json
 {
   "run_id": "run_...",
+  "control_handle": "opaque-per-run-capability",
   "expected_version": 4,
   "action": {
     "type": "message",
@@ -374,13 +397,11 @@ Supported variants are:
 | `assign` | Assignee, objective, done criteria, dependencies, and budget slice. |
 | `message` | Exact recipient, bounded body, and optional correlation. |
 | `review` | Work item, `accept` or `reject`, evidence, and optional revision request. |
-| `decision_response` | Exact decision, scope and artifact hashes, and offered choice. |
 | `finish` | Final synthesis, accepted work IDs, verification state, and limitations. |
-| `claim_control` | Last-seen coordination epoch and reason; allowed only after expiry or explicit handoff. |
 
-The service rejects stale `expected_version`, actions outside the controller lease, and mutations
-that would exceed the approved envelope. `claim_control` is the narrow exception used to acquire a
-new lease under the rules above. `team_expand` is the only path that can enlarge the envelope.
+The service rejects stale `expected_version`, invalid control handles, actions outside the controller
+lease, and mutations that would exceed the approved envelope. Expansion uses a trusted
+CLI/dashboard or a host adapter that can provide independently verifiable human authorization.
 
 MCP task augmentation is a future transport optimization. Agentisan currently negotiates the
 2025-11-25 protocol, where MCP tasks are experimental and require capability negotiation. V3
@@ -464,9 +485,11 @@ dependent work and returns `input_required` when a worker needs:
 - more root budget or time;
 - recovery from an unknown effect.
 
-The `team_update` decision-response action requires the exact decision ID, scope hash, artifact
-revision, and offered choice. Changing the underlying artifact invalidates the decision. An agent
-request never counts as human approval by itself.
+The generic MCP tools can request and observe a human decision but cannot resolve one. Resolution
+uses the trusted CLI/dashboard or a native host adapter that can prove a human interaction. It
+requires the exact decision ID, scope hash, artifact revision, and offered choice. Changing the
+underlying artifact invalidates the decision. A chat message, model-generated tool call, visible hash,
+or shared operator credential is not a trusted human approval receipt.
 
 ## Loop, cost, and stagnation control
 
@@ -503,6 +526,7 @@ bounded audit and cursor projection rather than the sole source of truth.
 Proposed additive schema:
 
 - `run_actors`: human, controller, agent, verifier, and system actors;
+- `control_capabilities`: per-run control-handle hash, status, creation, rotation, and revocation;
 - `controller_leases`: run, principal, connector instance, epoch, state, and expiry;
 - `run_events`: sequence, run, actor, kind, compact payload, and timestamp;
 - `worker_instances`: resolved adapter policy and native binding per run;
@@ -522,7 +546,7 @@ schema version.
 |---|---|
 | MCP connector closes | Workers may finish admitted work; results persist; controller-required work waits. |
 | Daemon restarts | Fence active native turns, mark uncertain effects, recover queued work, never replay unknown effects. |
-| Controller lease expires | Allow inspection; require explicit claim or handoff before mutation. |
+| Controller lease expires | Allow inspection; let the same control handle reacquire, or require explicit handoff/recovery. |
 | Provider CLI exits without commit | Keep inputs pending, discard private staging, record failure. |
 | Provider reports a different session ID | Fence the turn and require inspection. |
 | Worker stops making progress | Trip stagnation circuit breaker and return control. |
@@ -548,9 +572,11 @@ The generic MCP connector uses a local operator credential stored with owner-onl
 actor authorization still apply inside that boundary. The loopback API rejects browser origins and is
 not exposed through a proxy or tunnel by default.
 
-Credentials, prompts, raw provider traces, session IDs, and private artifacts stay out of Git and MCP
-error messages. Tool inputs reject unknown fields. Responses are bounded. All live, cancellation,
-decision, and integration tools have accurate MCP annotations and closed error codes.
+Credentials, control handles, prompts, raw provider traces, session IDs, and private artifacts stay
+out of Git, service logs, worker prompts, and MCP error messages. Only the initiating controller
+context receives its control handle; the database stores a hash. Tool inputs reject unknown fields.
+Responses are bounded. All live, cancellation, decision, and integration tools have accurate MCP
+annotations and closed error codes.
 
 ## Implementation plan
 
@@ -567,7 +593,7 @@ calls.
 ### Phase 1 — Interactive coordination on the existing static roster
 
 - Add actor mailboxes, controller leases, run mode, coordination epoch, and run events.
-- Implement `team_start`, `team_status`, `team_update`, `team_expand`, and `team_cancel`.
+- Implement `team_start`, `team_status`, `team_update`, and `team_cancel`.
 - Skip the configured native lead in interactive mode; dispatch initial work directly to workers.
 - Make controller disconnect and reconnect durable.
 
@@ -619,10 +645,13 @@ with an explicit capability result.
 
 - schema migration from every retained core-v2 version;
 - simultaneous start and controller-claim races;
+- cross-chat mutation attempts with a shared connector credential but no run control handle;
+- read-only status polling never acquiring or renewing a controller lease;
 - exact retry versus changed-payload idempotency;
 - worker-to-worker and worker-to-controller routing;
 - stable inbox snapshots and atomic publication;
 - controller disconnect/reconnect and stale-epoch rejection;
+- attempted human-decision resolution through model-facing tools;
 - dependency, budget, stagnation, timeout, cancellation, and unknown-effect boundaries;
 - output limits, origin rejection, credential permissions, and error redaction;
 - CLI/MCP parity and dashboard read-only behavior on macOS, Linux, and Windows.
