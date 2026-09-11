@@ -47,6 +47,17 @@ the lead; the lead decides assignments and sends them through MCP. The scheduler
 executes one native CLI turn at a time, preserving separate contexts and allowing peer
 messages. Concurrent native execution is a future optimization, not a current claim.
 
+Open the live terminal dashboard in another iTerm2 or terminal window:
+
+```sh
+./target/debug/agentisan --data-dir "$PWD/.agentisan"
+```
+
+Up/Down switches runs, clicking an agent or pressing Tab filters its message routes, and `o` opens
+the selected agent's exact native CLI session only after Agentisan has released the run. The
+dashboard reads authoritative local state directly and does not require a browser or another model
+call.
+
 Creating an existing managed team fails rather than silently replacing profiles or credentials.
 New objectives on a team get fresh native sessions; old native IDs remain in the turn history.
 Only one active run per team is allowed. Client-led coordination through a natively bound
@@ -217,7 +228,7 @@ The latest committed validation used the default low-effort Sonnet/Luna profile.
 directions completed five native turns, two assignments, eleven persistent messages, all six
 checked communication routes, and three distinct native sessions, with no pending messages.
 See the [sanitized results](../validation/live-teams.md). Ordinary validation currently comprises
-62 tests; CI runs them on Linux, macOS, and Windows without model calls.
+68 tests; CI runs them on Linux, macOS, and Windows without model calls.
 
 ```sh
 AGENTISAN_LIVE_TESTS=1 \

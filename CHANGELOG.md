@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added a default live terminal dashboard with clickable agent filtering, automatic refresh, and
+  combined run, assignment, decision, budget, and message-route views.
+- Added safe exact-session opening for released Claude Code and Codex CLI agents; active and
+  unsupported Desktop targets fail closed.
+- Added `agentisan dashboard [RUN_ID]` and `agentisan open RUN_ID AGENT_ID`; existing subcommands
+  remain available for automation.
 - Added core-v2 durable turn protocol: schema version 7, short-lived per-turn lease
   credentials, ownership epochs, complete stable inbox snapshots, staged sends, and atomic
   `turn_commit`.

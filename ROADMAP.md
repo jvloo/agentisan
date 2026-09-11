@@ -60,8 +60,9 @@ Acceptance:
 **Status: core communication implemented.** Reusable service-owned teams perform real lead/worker
 and worker/worker MCP exchanges in both provider directions. CLI/MCP inspection, bounded live
 watching, authoritative runtime activity, exact native IDs, lease-fenced turns, role-scoped MCP
-profiles, stable inbox reads, atomic commits, and separate result verification work. Client-owned
-lead binding, Desktop writer connectors, native deep-link opening, and concurrent native turns remain open.
+profiles, stable inbox reads, atomic commits, separate result verification, and a live read-only
+terminal dashboard work. Client-owned lead binding, Desktop writer connectors, native deep-link
+opening, and concurrent native turns remain open.
 
 Goal: a main agent driven from an existing CLI/Desktop client can delegate to multiple workers that exchange bounded peer messages, with native links back into supported clients.
 
