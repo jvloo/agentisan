@@ -758,6 +758,7 @@ pub async fn finish(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    let _ = fs::remove_file(&work.credential_file);
     Ok(())
 }
 

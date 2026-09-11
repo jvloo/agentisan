@@ -224,13 +224,30 @@ async fn explicit_mcp_profiles_expose_separate_least_privilege_catalogs() {
             "agent_context_get",
             "inbox_read",
             "message_send",
-            "result_propose"
+            "result_propose",
+            "turn_commit"
         ]
     );
     for tool in agent_tools["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{tool}");
         assert_eq!(tool["annotations"]["destructiveHint"], false);
     }
+    let inbox = agent_tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "inbox_read")
+        .unwrap();
+    assert_eq!(inbox["annotations"]["readOnlyHint"], true);
+    assert_eq!(inbox["annotations"]["idempotentHint"], true);
+    let commit = agent_tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "turn_commit")
+        .unwrap();
+    assert_eq!(commit["annotations"]["readOnlyHint"], false);
+    assert_eq!(commit["annotations"]["idempotentHint"], true);
     assert_eq!(
         tool_json(&agent.call("agent_context_get", json!({})).await)["identity"]["agent_id"],
         "inventory_lead"
@@ -257,7 +274,7 @@ async fn explicit_mcp_profiles_expose_separate_least_privilege_catalogs() {
     assert_eq!(
         serde_json::from_str::<Value>(rejected["result"]["content"][0]["text"].as_str().unwrap())
             .unwrap()["error"]["code"],
-        "request_rejected"
+        "lease_not_active"
     );
 }
 

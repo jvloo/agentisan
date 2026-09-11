@@ -142,11 +142,26 @@ fn public_action_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     let detail = error.to_string();
     let (status, code) = if detail.contains("run not found") {
         (StatusCode::NOT_FOUND, "not_found")
+    } else if detail.contains("exact current turn lease")
+        || detail.contains("turn lease is fenced")
+        || detail.contains("turn lease is already committed")
+    {
+        (StatusCode::FORBIDDEN, "lease_not_active")
     } else if detail.contains("no owned active turn")
         || detail.contains("agent binding is required")
         || detail.contains("only the lead")
     {
         (StatusCode::FORBIDDEN, "action_not_permitted")
+    } else if detail.contains("messages are still pending")
+        || detail.contains("teammates must settle")
+    {
+        (StatusCode::CONFLICT, "work_pending")
+    } else if detail.contains("message budget exhausted") {
+        (StatusCode::CONFLICT, "budget_exhausted")
+    } else if detail.contains("idempotency key reused") {
+        (StatusCode::CONFLICT, "idempotency_conflict")
+    } else if detail.contains("reply must address the original sender") {
+        (StatusCode::BAD_REQUEST, "invalid_reply")
     } else if detail.contains("database") || detail.contains("SQL") {
         (StatusCode::SERVICE_UNAVAILABLE, "runtime_unavailable")
     } else {

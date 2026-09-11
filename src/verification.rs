@@ -87,17 +87,20 @@ async fn reserve(
     }
     let verifier_hash = digest(&std::fs::read(&verifier)?);
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row = sqlx::query("SELECT state,result FROM runs WHERE id=?")
+    let row = sqlx::query("SELECT r.state,p.result FROM runs r LEFT JOIN run_proposals p ON p.run_id=r.id WHERE r.id=?")
         .bind(run_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("run not found"))?;
-    if row.get::<String, _>("state") != "completed" {
-        bail!("only a completed agent proposal can be independently verified");
+    if matches!(
+        row.get::<String, _>("state").as_str(),
+        "queued" | "running" | "completing"
+    ) {
+        bail!("an agent proposal can be verified only after its native turn settles");
     }
     let result = row
         .get::<Option<String>, _>("result")
-        .ok_or_else(|| anyhow::anyhow!("completed run has no proposed result"))?;
+        .ok_or_else(|| anyhow::anyhow!("run has no durable proposed result"))?;
     let id = teams::new_id("verification");
     sqlx::query("INSERT INTO verifications(id,run_id,status,verifier_path,verifier_sha256,result_sha256,started_at,artifacts) VALUES(?,?,'running',?,?,?,?,?)")
         .bind(&id)

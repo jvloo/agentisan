@@ -73,6 +73,15 @@ pub struct ProposeArgs {
     pub result: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CommitArgs {
+    /// Exact run assigned by the host. The lease binds it to the active turn.
+    pub run_id: String,
+    /// Stable key for this logical commit. An exact retry returns the first receipt.
+    pub idempotency_key: String,
+}
+
 fn success(value: serde_json::Value) -> CallToolResult {
     let encoded = value.to_string();
     if encoded.len() > MAX_MCP_RESULT_BYTES {
@@ -97,7 +106,19 @@ fn rejected() -> CallToolResult {
 
 fn action_rejected(error: &anyhow::Error) -> CallToolResult {
     let detail = error.to_string();
-    let code = if detail.contains("only the lead may propose completion") {
+    let code = if detail.contains("lease_not_active") {
+        "lease_not_active"
+    } else if detail.contains("action_not_permitted") {
+        "role_forbidden"
+    } else if detail.contains("work_pending") {
+        "work_pending"
+    } else if detail.contains("budget_exhausted") {
+        "budget_exhausted"
+    } else if detail.contains("idempotency_conflict") {
+        "idempotency_conflict"
+    } else if detail.contains("invalid_reply") {
+        "invalid_reply"
+    } else if detail.contains("only the lead may propose completion") {
         "role_forbidden"
     } else if detail.contains("messages are still pending")
         || detail.contains("teammates must settle")
@@ -109,6 +130,13 @@ fn action_rejected(error: &anyhow::Error) -> CallToolResult {
         "run_not_active"
     } else if detail.contains("no owned active turn") {
         "turn_not_owned"
+    } else if detail.contains("exact current turn lease")
+        || detail.contains("turn lease is fenced")
+        || detail.contains("turn lease is already committed")
+    {
+        "lease_not_active"
+    } else if detail.contains("invalid commit idempotency") {
+        "invalid_commit"
     } else if detail.contains("recipient not in this team") {
         "recipient_not_available"
     } else if detail.contains("idempotency key reused") {
@@ -343,7 +371,7 @@ impl AgentServer {
             Ok(value) if value["status"] == "bound" => value,
             _ => return Ok(rejected()),
         };
-        let mut capabilities = vec!["inbox_read", "message_send"];
+        let mut capabilities = vec!["inbox_read", "message_send", "turn_commit"];
         if self.can_propose {
             capabilities.push("result_propose");
         }
@@ -353,16 +381,16 @@ impl AgentServer {
             "role": if self.can_propose {"lead"} else {"worker"},
             "capabilities": capabilities,
             "run_binding": "validated_by_service_on_each_action",
-            "turn_commit": "not_available_until_atomic_event_leases_ship"
+            "delivery": "read_claims_input_without_ack; turn_commit_acknowledges_and_publishes_atomically"
         })))
     }
 
     #[tool(
-        description = "Read and acknowledge unread inbox messages for your active turn. Call once at turn start. This compatibility operation is not crash-atomic; end the turn instead of polling.",
+        description = "Read the messages claimed for your active turn without acknowledging processing. Repeated reads return the same snapshot. Do not poll.",
         annotations(
-            read_only_hint = false,
+            read_only_hint = true,
             destructive_hint = false,
-            idempotent_hint = false,
+            idempotent_hint = true,
             open_world_hint = false
         )
     )]
@@ -373,12 +401,31 @@ impl AgentServer {
         if !valid_identifier(&args.run_id) {
             return Ok(rejected());
         }
-        // Integration hook: when the team runtime exposes event leases, this
-        // compatibility action becomes a non-acknowledging read and a separate
-        // `turn_commit` publishes staged outputs plus acknowledgements atomically.
-        // Do not expose a turn_commit DTO before that transaction exists.
         self.action(crate::teams::Action::Receive {
             run_id: args.run_id,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Atomically acknowledge this turn's claimed inputs and publish its staged messages. An exact retry returns the original receipt.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn turn_commit(
+        &self,
+        Parameters(args): Parameters<CommitArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !valid_identifier(&args.run_id) || !valid_identifier(&args.idempotency_key) {
+            return Ok(rejected());
+        }
+        self.action(crate::teams::Action::Commit {
+            run_id: args.run_id,
+            idempotency_key: args.idempotency_key,
         })
         .await
     }
@@ -423,7 +470,7 @@ impl AgentServer {
         annotations(
             read_only_hint = false,
             destructive_hint = false,
-            idempotent_hint = false,
+            idempotent_hint = true,
             open_world_hint = false
         )
     )]
@@ -450,7 +497,7 @@ impl ServerHandler for AgentServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Agentisan agent profile. Identity and sender come from the connector credential; every action is restricted to its assigned active run and turn. Read the inbox once, do available work, send bounded messages, then end the native turn. Only the lead may propose a result. Proposal is separate from acceptance. This profile cannot inspect groups, enumerate teams, read the full timeline, alter permissions, approve decisions, or execute commands.")
+            .with_instructions("Agentisan agent profile. Identity and sender come from the per-turn lease credential; every action is restricted to its assigned active run and ownership epoch. Read the inbox once, do available work, stage bounded messages, then call turn_commit before ending the native turn. Only the lead may call result_propose; a successful proposal commits that lead turn automatically. Proposal is separate from acceptance. This profile cannot inspect groups, enumerate teams, read the full timeline, alter permissions, approve decisions, or execute commands.")
     }
 }
 
@@ -495,7 +542,7 @@ mod tests {
         let lead = AgentServer::new(client, true);
         assert!(!worker.tool_router.has_route("result_propose"));
         assert!(lead.tool_router.has_route("result_propose"));
-        assert_eq!(worker.tool_router.list_all().len(), 3);
-        assert_eq!(lead.tool_router.list_all().len(), 4);
+        assert_eq!(worker.tool_router.list_all().len(), 4);
+        assert_eq!(lead.tool_router.list_all().len(), 5);
     }
 }

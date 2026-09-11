@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-async fn completed_proposal(data: &std::path::Path, result: &str) -> (String, String) {
+async fn proposal(data: &std::path::Path, result: &str, native_failure: bool) -> (String, String) {
     let registry = Registry::open(&fixture::database_path(data).unwrap())
         .await
         .unwrap();
@@ -46,9 +46,10 @@ async fn completed_proposal(data: &std::path::Path, result: &str) -> (String, St
         .await
         .unwrap();
     let work = teams::next(&registry).await.unwrap().unwrap();
+    let lease = fixture::read_credential(&work.credential_file).unwrap();
     teams::act(
         &registry,
-        &token,
+        &lease,
         Action::Receive {
             run_id: run.clone(),
         },
@@ -57,7 +58,7 @@ async fn completed_proposal(data: &std::path::Path, result: &str) -> (String, St
     .unwrap();
     teams::act(
         &registry,
-        &token,
+        &lease,
         Action::Complete {
             run_id: run.clone(),
             result: result.into(),
@@ -65,18 +66,17 @@ async fn completed_proposal(data: &std::path::Path, result: &str) -> (String, St
     )
     .await
     .unwrap();
-    teams::finish(
-        &registry,
-        &work,
+    let outcome = if native_failure {
+        Err(anyhow::anyhow!("native process failed after proposal"))
+    } else {
         Ok(agentisan::worker::TurnResult {
             native_id: uuid::Uuid::new_v4().to_string(),
             output: "Proposed".into(),
             usage: serde_json::Value::Null,
             artifacts: PathBuf::new(),
-        }),
-    )
-    .await
-    .unwrap();
+        })
+    };
+    teams::finish(&registry, &work, outcome).await.unwrap();
     registry.close().await;
     (run, token)
 }
@@ -87,10 +87,49 @@ fn verifier(path: &std::path::Path, body: &str) {
 }
 
 #[tokio::test]
+async fn durable_proposal_remains_verifiable_after_native_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let (run, token) = proposal(&data, "surviving proposal", true).await;
+    let check = temp.path().join("accept-failed-run.sh");
+    verifier(
+        &check,
+        "#!/bin/sh\ninput=$(cat)\n[ \"$input\" = \"surviving proposal\" ] || exit 2\nprintf '%s\\n' '{\"accepted\":true,\"summary\":\"proposal survived\"}'\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_agentisan"))
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "runs",
+            "verify",
+            &run,
+            "--verifier",
+            check.to_str().unwrap(),
+            "--timeout-seconds",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let registry = Registry::open(&data.join("registry.sqlite3"))
+        .await
+        .unwrap();
+    let inspected = teams::inspect_run(&registry, &token, &run).await.unwrap();
+    assert_eq!(inspected["state"], "failed");
+    assert_eq!(inspected["proposal"]["result"], "surviving proposal");
+    assert_eq!(inspected["acceptance"], "accepted");
+    registry.close().await;
+}
+
+#[tokio::test]
 async fn deterministic_verifier_accepts_exact_result_and_is_terminal() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("state");
-    let (run, token) = completed_proposal(&data, "exact proposal bytes").await;
+    let (run, token) = proposal(&data, "exact proposal bytes", false).await;
     let check = temp.path().join("accept.sh");
     verifier(
         &check,
@@ -190,7 +229,7 @@ async fn deterministic_verifier_accepts_exact_result_and_is_terminal() {
 async fn malformed_verifier_is_recorded_and_a_later_rejection_is_allowed() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("state");
-    let (run, token) = completed_proposal(&data, "candidate").await;
+    let (run, token) = proposal(&data, "candidate", false).await;
     let malformed = temp.path().join("malformed.sh");
     verifier(&malformed, "#!/bin/sh\ncat >/dev/null\nprintf 'not json'\n");
     let failed = Command::new(env!("CARGO_BIN_EXE_agentisan"))
@@ -253,7 +292,7 @@ async fn malformed_verifier_is_recorded_and_a_later_rejection_is_allowed() {
 async fn verifier_deadline_records_error_without_acceptance() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("state");
-    let (run, token) = completed_proposal(&data, "candidate").await;
+    let (run, token) = proposal(&data, "candidate", false).await;
     let check = temp.path().join("slow.sh");
     verifier(
         &check,
@@ -295,7 +334,7 @@ async fn verifier_deadline_records_error_without_acceptance() {
 async fn later_cli_verification_fences_a_crashed_reservation() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("state");
-    let (run, token) = completed_proposal(&data, "candidate").await;
+    let (run, token) = proposal(&data, "candidate", false).await;
     let database = data.join("registry.sqlite3");
     let options = SqliteConnectOptions::new()
         .filename(&database)

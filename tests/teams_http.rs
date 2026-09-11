@@ -45,10 +45,11 @@ async fn largest_semantic_result_survives_json_escaping_and_http_framing() {
     let run = teams::start(&registry, "t", "Work", 4, 4, 60, 10)
         .await
         .unwrap();
-    teams::next(&registry).await.unwrap().unwrap();
+    let work = teams::next(&registry).await.unwrap().unwrap();
+    let lease = fixture::read_credential(&work.credential_file).unwrap();
     teams::act(
         &registry,
-        &token,
+        &lease,
         Action::Receive {
             run_id: run.clone(),
         },
@@ -65,7 +66,7 @@ async fn largest_semantic_result_survives_json_escaping_and_http_framing() {
         .build()
         .unwrap()
         .post(url)
-        .bearer_auth(&token)
+        .bearer_auth(&lease)
         .json(&Action::Complete {
             run_id: run.clone(),
             result: result.clone(),
@@ -164,7 +165,7 @@ async fn scheduler_database_failure_stops_service_and_fences_work() {
         .filename(&database)
         .foreign_keys(true);
     let mut damaged = SqliteConnection::connect_with(&options).await.unwrap();
-    sqlx::query("DROP TABLE messages")
+    sqlx::query("ALTER TABLE messages RENAME TO messages_broken")
         .execute(&mut damaged)
         .await
         .unwrap();
@@ -230,10 +231,10 @@ async fn team_action_returns_closed_error_codes() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
     assert_eq!(
         response.json::<serde_json::Value>().await.unwrap()["error"],
-        "action_rejected"
+        "lease_not_active"
     );
     service.abort();
 }
