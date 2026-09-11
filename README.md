@@ -72,6 +72,7 @@ Use another state directory or select an exact run at startup:
 ```sh
 agentisan --data-dir /absolute/path/to/state
 agentisan --data-dir /absolute/path/to/state dashboard RUN_ID
+agentisan --data-dir /absolute/path/to/state dashboard RUN_ID --agent AGENT_ID
 ```
 
 The dashboard refreshes automatically and combines runs, agents, assignments, decisions, budgets,

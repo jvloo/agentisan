@@ -51,6 +51,7 @@ Open the live terminal dashboard in another iTerm2 or terminal window:
 
 ```sh
 ./target/debug/agentisan --data-dir "$PWD/.agentisan"
+./target/debug/agentisan --data-dir "$PWD/.agentisan" dashboard RUN_ID --agent AGENT_ID
 ```
 
 Up/Down switches runs, clicking an agent or pressing Tab filters its message routes, and `o` opens

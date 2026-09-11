@@ -32,6 +32,9 @@ enum Command {
     Dashboard {
         /// Open with this run selected; defaults to the newest run.
         run_id: Option<String>,
+        /// Open with this agent selected and its communication filtered.
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Open one released agent session in an exact native client.
     Open {
@@ -227,10 +230,10 @@ enum AgentsCommand {
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
-    let command = cli
-        .command
-        .take()
-        .unwrap_or(Command::Dashboard { run_id: None });
+    let command = cli.command.take().unwrap_or(Command::Dashboard {
+        run_id: None,
+        agent: None,
+    });
     // The process-group anchor only uses std process/thread APIs. Avoid creating
     // a Tokio worker pool for every supervised CLI invocation.
     if let Command::WorkerHost {
@@ -249,8 +252,9 @@ fn main() -> Result<()> {
 
 async fn run(cli: Cli, command: Command) -> Result<()> {
     let query = match command {
-        Command::Dashboard { run_id } => {
-            return agentisan::dashboard::run(&cli.data_dir, run_id.as_deref()).await;
+        Command::Dashboard { run_id, agent } => {
+            return agentisan::dashboard::run(&cli.data_dir, run_id.as_deref(), agent.as_deref())
+                .await;
         }
         Command::Open {
             run_id,
