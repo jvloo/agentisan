@@ -22,7 +22,8 @@ After implementing the exact-result verifier, the preserved run was checked agai
 recorded `acceptance: rejected`, the failed case and actual output, hashes of the proposed result
 and verifier, and the verifier artifact location. A malformed or timed-out verifier records an
 error without acceptance; an accepted or rejected receipt is terminal. Tests cover acceptance,
-rejection after an error, bounded timeout, changed live snapshots, and authoritative activity.
+rejection after an error, bounded timeout, and authoritative activity. The current watcher test
+exercises a terminal snapshot; it does not prove a changed snapshot arriving during an active run.
 
 The committed report omits raw run, credential, message, and native session identifiers. The
 private local evidence remains under the ignored `.agentisan/` directory. This validation proves

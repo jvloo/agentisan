@@ -4,9 +4,9 @@
 
 Agentisan is a local toolkit for making groups of agent teams identifiable and inspectable
 from existing CLI and Desktop clients. Its longer-term goal is bounded collaboration across
-providers, with persistent work records and explicit human decisions.
+providers, with persistent work records and a future path for explicit human decisions.
 
-**Current status: reusable native CLI teams.** The Rust service can run a Claude lead with
+**Current status: reusable native CLI teams (core-v2).** The Rust service can run a Claude lead with
 Codex workers and the reverse, with real peer-to-peer MCP messages and persistent native
 session IDs. Live execution currently supports macOS/Linux and consultation profiles;
 shell/file-editing tools are disabled. Human approval workflows, general job reconciliation,
@@ -29,7 +29,14 @@ configuration. The fixture walkthrough below exercises inspection without model 
 - Deliver real messages through MCP between the lead and workers and directly between workers.
 - Bound CLI invocations, message count, elapsed time, and output; stop stalled work.
 - Preserve exact native sessions between turns, with explicit resume of inspected unread work.
-- Stream changed authoritative run snapshots with a bounded, read-only CLI watch command.
+- Stream authoritative run snapshots with a bounded, read-only CLI watch command.
+- Issue short-lived per-turn lease credentials fenced by agent ownership epochs.
+- Separate agent and observer MCP profiles; observer credentials are read-only.
+- Read a stable inbox snapshot without acknowledgement; stage sends and publish them with
+  an atomic `turn_commit` (a successful lead proposal commits its inputs atomically).
+- Persist result proposals independently of native turn success so they can be verified after
+  a process failure or service restart.
+- Fail closed when the worker scheduler is unhealthy and recover abandoned verifier reservations.
 - Run an administrator-selected deterministic verifier against the exact proposed result and
   persist an accepted, rejected, or error receipt with result and verifier hashes.
 
@@ -90,11 +97,12 @@ absolute path to the built `agentisan` executable, using arguments shaped like:
 }
 ```
 
-The enclosing configuration format depends on the client. The connector exposes `whoami`,
+The enclosing configuration format depends on the client. The observer profile exposes `whoami`,
 `groups_list`, `teams_list`, `agents_list`, `agents_inspect`, `runs_inspect`, and `messages_list`
-for inspection. Managed agents additionally use `messages_receive`, `messages_send`, and
-`runs_complete` during their active turn. These do not expose shell execution, administrative
-registration, or human approval. Each connector has one explicitly provisioned credential;
+for inspection. The agent profile exposes `agent_context_get`, `inbox_read`, `message_send`,
+`turn_commit`, and (for leads) `result_propose` during an active, short-lived turn lease. These
+profiles do not expose shell execution, administrative registration, or human approval. Each
+connector has one explicitly provisioned credential;
 sharing it across conversations shares access and does not identify those conversations.
 
 Agentisan's runtime state is authoritative while it owns a managed turn. A native Desktop client
