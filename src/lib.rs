@@ -7,4 +7,5 @@ pub mod model;
 pub mod registry;
 pub mod server;
 pub mod teams;
+pub mod verification;
 pub mod worker;

@@ -68,7 +68,7 @@ impl Registry {
             0 => {
                 sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
             }
-            1..=3 => {}
+            1..=4 => {}
             _ => {
                 return Err(RegistryError::Invalid(
                     "unsupported database schema version".into(),
@@ -82,6 +82,11 @@ impl Registry {
         }
         if version < 3 {
             sqlx::raw_sql("CREATE TABLE IF NOT EXISTS registry_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO registry_meta(key,value) SELECT 'initialized','1' WHERE EXISTS(SELECT 1 FROM groups); PRAGMA user_version=3;").execute(&mut *tx).await?;
+        }
+        if version < 4 {
+            sqlx::raw_sql(crate::verification::SCHEMA)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(Self { pool })
@@ -264,14 +269,32 @@ impl Registry {
                         .fetch_one(&self.pool)
                         .await?;
                 if managed > 0 {
-                    let state: Option<String> = sqlx::query_scalar(
-                        "SELECT state FROM turns WHERE agent_id=? ORDER BY rowid DESC LIMIT 1",
-                    )
-                    .bind(agent.id.as_str())
-                    .fetch_optional(&self.pool)
-                    .await?;
+                    let latest_run=sqlx::query("SELECT id,state,created_at FROM runs WHERE team_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1")
+                        .bind(agent.team_id.as_str()).fetch_optional(&self.pool).await?;
+                    let activity = if let Some(run) = latest_run {
+                        let run_id: String = run.get("id");
+                        let run_state: String = run.get("state");
+                        let turn=sqlx::query("SELECT id,state,started_at FROM turns WHERE run_id=? AND agent_id=? ORDER BY rowid DESC LIMIT 1")
+                            .bind(&run_id).bind(agent.id.as_str()).fetch_optional(&self.pool).await?;
+                        let running = turn
+                            .as_ref()
+                            .is_some_and(|row| row.get::<String, _>("state") == "running");
+                        json!({
+                            "source":"agentisan_runtime",
+                            "authoritative":true,
+                            "state":if running {"running"} else if matches!(run_state.as_str(),"queued"|"running"|"completing") {"waiting"} else {"idle"},
+                            "run_id":run_id,
+                            "run_state":run_state,
+                            "turn_id":turn.as_ref().map(|row|row.get::<String,_>("id")),
+                            "turn_state":turn.as_ref().map(|row|row.get::<String,_>("state")),
+                            "since":turn.as_ref().map(|row|row.get::<i64,_>("started_at")).unwrap_or_else(||run.get::<i64,_>("created_at")),
+                            "native_client_status":"advisory_while_agentisan_owns_the_run"
+                        })
+                    } else {
+                        json!({"source":"agentisan_runtime","authoritative":true,"state":"not_started","native_client_status":"advisory"})
+                    };
                     return Ok(
-                        json!({"agent":agent,"source":"managed_cli","activity":state.unwrap_or_else(||"not_started".into()),"capabilities":{"inspect":true,"messages":true,"native_open":false,"native_resume":false,"shell_execution":false}}),
+                        json!({"agent":agent,"source":"managed_cli","activity":activity,"capabilities":{"inspect":true,"messages":true,"native_open":false,"native_resume":false,"shell_execution":false}}),
                     );
                 }
                 Ok(

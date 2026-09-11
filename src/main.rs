@@ -12,7 +12,7 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Parser)]
 #[command(
     version,
-    about = "Inspect persistent simulated agent teams through CLI and MCP"
+    about = "Run and inspect persistent agent teams through CLI and MCP"
 )]
 struct Cli {
     #[arg(long, global = true, default_value = ".agentisan")]
@@ -52,7 +52,7 @@ enum Command {
     },
     /// Connect an MCP host over stdio. Registry records remain in the separate service.
     Mcp,
-    /// Report the credential's fixture binding, or unbound when none is provided.
+    /// Report the credential's agent binding, or unbound when none is provided.
     Whoami,
     Groups {
         #[command(subcommand)]
@@ -112,6 +112,22 @@ enum TeamsCommand {
 enum RunsCommand {
     Inspect {
         run_id: String,
+    },
+    /// Poll authoritative Agentisan state and print changed snapshots as JSON lines.
+    Watch {
+        run_id: String,
+        #[arg(long, default_value_t = 500)]
+        interval_ms: u64,
+        #[arg(long, default_value_t = 300)]
+        timeout_seconds: u64,
+    },
+    /// Run one administrator-selected deterministic verifier against a completed proposal.
+    Verify {
+        run_id: String,
+        #[arg(long)]
+        verifier: PathBuf,
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
     },
     /// Resume unread work after inspecting a stalled run; original limits stay in force.
     Resume {
@@ -280,6 +296,69 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Runs {
             command: RunsCommand::Inspect { run_id },
         } => Query::RunsInspect { run_id },
+        Command::Runs {
+            command:
+                RunsCommand::Watch {
+                    run_id,
+                    interval_ms,
+                    timeout_seconds,
+                },
+        } => {
+            if !(100..=60_000).contains(&interval_ms) || !(1..=3600).contains(&timeout_seconds) {
+                bail!("watch interval or deadline is outside the bounded range");
+            }
+            let client = Client::new(&cli.endpoint, cli.credential_file.as_deref())?;
+            let started = std::time::Instant::now();
+            let mut previous = None;
+            loop {
+                let value = client
+                    .inspect(Query::RunsInspect {
+                        run_id: run_id.clone(),
+                    })
+                    .await?;
+                let encoded = serde_json::to_string(&value)?;
+                if previous.as_deref() != Some(encoded.as_str()) {
+                    println!("{encoded}");
+                    previous = Some(encoded);
+                }
+                let terminal = matches!(
+                    value["state"].as_str(),
+                    Some("completed" | "failed" | "exhausted" | "stalled" | "interrupted")
+                );
+                if terminal {
+                    return Ok(());
+                }
+                if started.elapsed() >= std::time::Duration::from_secs(timeout_seconds) {
+                    bail!("watch deadline reached before a terminal run state");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+            }
+        }
+        Command::Runs {
+            command:
+                RunsCommand::Verify {
+                    run_id,
+                    verifier,
+                    timeout_seconds,
+                },
+        } => {
+            let path = fixture::database_path(&cli.data_dir)?;
+            if !path.is_file() {
+                bail!("registry not initialized");
+            }
+            let registry = Registry::open(&path).await?;
+            let value = agentisan::verification::verify(
+                &registry,
+                &cli.data_dir.canonicalize()?,
+                &run_id,
+                &verifier,
+                timeout_seconds,
+            )
+            .await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
         Command::Runs {
             command:
                 RunsCommand::Resume {

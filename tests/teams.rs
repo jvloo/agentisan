@@ -243,6 +243,17 @@ async fn native_bindings_cannot_silently_change_on_resume() {
     let run = teams::start(&r, "team", "Work", 4, 8, 120, 20)
         .await
         .unwrap();
+    let queued = r
+        .inspect(
+            Some(&t[0]),
+            Query::AgentsInspect {
+                agent_id: "lead".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued["activity"]["state"], "waiting");
+    assert_eq!(queued["activity"]["run_state"], "queued");
     teams::next(&r).await.unwrap().unwrap();
     teams::record_binding(&r, &run, "lead", &id).await.unwrap();
     teams::record_binding(&r, &run, "lead", &id).await.unwrap();
@@ -262,6 +273,16 @@ async fn native_bindings_cannot_silently_change_on_resume() {
         .unwrap();
     assert_eq!(inspected["source"], "managed_cli");
     assert_eq!(inspected["agent"]["native_binding"]["session_id"], id);
+    assert_eq!(inspected["activity"]["state"], "running");
+    assert_eq!(inspected["activity"]["source"], "agentisan_runtime");
+    assert_eq!(
+        inspected["activity"]["native_client_status"],
+        "advisory_while_agentisan_owns_the_run"
+    );
+    let run_state = teams::inspect_run(&r, &t[0], &run).await.unwrap();
+    assert_eq!(run_state["activity"]["state"], "running");
+    assert_eq!(run_state["activity"]["active_agent_id"], "lead");
+    assert_eq!(run_state["message_count"], 1);
     r.close().await;
 }
 

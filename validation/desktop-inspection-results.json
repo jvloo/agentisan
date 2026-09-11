@@ -1,0 +1,32 @@
+{
+  "kind": "live_desktop_inspection_and_acceptance",
+  "date": "2026-09-11",
+  "models": {
+    "lead": "claude-haiku-4-5",
+    "workers": "gpt-5.6-luna",
+    "worker_effort": "low"
+  },
+  "runtime": {
+    "seconds": 81,
+    "native_cli_invocations": 5,
+    "agent_messages": 6,
+    "verified_routes": 6,
+    "distinct_native_sessions": 3,
+    "session_continuity": true
+  },
+  "desktop": {
+    "navigation_during_run": true,
+    "mcp_transcript_readback_during_run": true,
+    "later_turn_readback_before_run_finished": true,
+    "native_live_status_accurate": false,
+    "automatic_visual_streaming_verified": false
+  },
+  "acceptance": {
+    "function_checks_passed": 312,
+    "function_checks_failed": 0,
+    "agent_case_expectations_passed": 10,
+    "agent_case_expectations_failed": 1,
+    "overall": "rejected",
+    "reason": "incorrect agent-produced expectation"
+  }
+}

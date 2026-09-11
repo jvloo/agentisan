@@ -29,6 +29,9 @@ configuration. The fixture walkthrough below exercises inspection without model 
 - Deliver real messages through MCP between the lead and workers and directly between workers.
 - Bound CLI invocations, message count, elapsed time, and output; stop stalled work.
 - Preserve exact native sessions between turns, with explicit resume of inspected unread work.
+- Stream changed authoritative run snapshots with a bounded, read-only CLI watch command.
+- Run an administrator-selected deterministic verifier against the exact proposed result and
+  persist an accepted, rejected, or error receipt with result and verifier hashes.
 
 Fixture bindings remain simulated. Managed bindings record IDs returned by configured native
 CLIs. `bound` identifies the provisioned credential; it does not independently authenticate
@@ -94,6 +97,31 @@ for inspection. Managed agents additionally use `messages_receive`, `messages_se
 registration, or human approval. Each connector has one explicitly provisioned credential;
 sharing it across conversations shares access and does not identify those conversations.
 
+Agentisan's runtime state is authoritative while it owns a managed turn. A native Desktop client
+may render an externally driven CLI session as interrupted even while Agentisan records it as
+running. Use `runs inspect` or the bounded watcher for liveness; use native history to inspect the
+conversation and MCP calls:
+
+```sh
+./target/debug/agentisan --credential-file /absolute/path/to/lead.token \
+  runs watch RUN_ID --interval-ms 500 --timeout-seconds 300
+```
+
+An agent-proposed result is execution-complete but remains `not_independently_verified`. A trusted
+local administrator can select a deterministic verifier executable. Agentisan sends the exact
+result bytes on stdin; the verifier must exit successfully and emit one JSON object shaped as
+`{"accepted":true|false,"summary":"...","evidence":...}`. No shell is used, and agents cannot
+invoke this command through MCP:
+
+```sh
+./target/debug/agentisan --data-dir /absolute/path/to/state runs verify RUN_ID \
+  --verifier /absolute/path/to/verifier --timeout-seconds 30
+```
+
+The verifier executable is trusted local code. The receipt records hashes of the verifier file and
+proposed result. A malformed, failed, oversized, or timed-out verifier is recorded as `error` and
+does not become acceptance; an accepted or rejected receipt is terminal for that run.
+
 The MCP connector queries the separate service. Closing the connector leaves the service
 and its records available. Closing the service requires restarting it before inspection can
 continue. No browser UI is required, and no URI handler is installed.
@@ -122,6 +150,8 @@ the service through a proxy or tunnel. See the [Milestone 1 contract](docs/miles
 - [Architecture](docs/architecture.md): the intended team runtime and its boundaries.
 - [Rust decision](docs/decisions/0001-rust-core.md): stack choice and deferred decisions.
 - [Live teams](docs/live-teams.md): real execution, inspection, limits, and validation.
+- [Desktop inspection validation](validation/desktop-inspection.md): active-run readback and
+  deterministic rejection of a flawed agent-produced bundle.
 - [Roadmap](ROADMAP.md): remaining milestones and acceptance criteria.
 - [Agent contribution instructions](AGENTS.md).
 - [MIT license](LICENSE).

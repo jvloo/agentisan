@@ -1,6 +1,12 @@
 # Architecture (proposed)
 
-This document describes Agentisan's broader runtime design. The Rust implementation now includes the fixture registry and managed native CLI teams with persistent MCP messages, bounded invocations, and native session continuation. See the [live-team contract](live-teams.md) for what is implemented and its limits. Human approvals, general effect reconciliation, direct API adapters, and native deep-link opening remain proposed. Rust is selected for the core ([decision](decisions/0001-rust-core.md)); a general durable-execution engine remains undecided.
+This document describes Agentisan's broader runtime design. The Rust implementation now includes
+the fixture registry, managed native CLI teams with persistent MCP messages, bounded invocations,
+native session continuation, authoritative live inspection, and administrator-selected deterministic
+verification of exact proposed results. See the [live-team contract](live-teams.md) for what is
+implemented and its limits. Human approvals, general effect reconciliation, direct API adapters,
+and native deep-link opening remain proposed. Rust is selected for the core
+([decision](decisions/0001-rust-core.md)); a general durable-execution engine remains undecided.
 
 ## Goals and non-goals
 
