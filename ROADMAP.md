@@ -25,8 +25,9 @@ Acceptance:
 ## Milestone 2 — Durable single worker and trusted human decisions
 
 **Status: partial.** Native CLI turns, completion receipts, process deadlines/watchdog,
-interrupted-state recording, narrow inspected resume, and deterministic exact-result verification
-receipts are implemented. General effect reconciliation and trusted human decisions remain open.
+interrupted-state recording, narrow inspected resume, deterministic exact-result verification
+receipts, durable proposals, lease fencing, and verifier reservation recovery are implemented.
+General effect reconciliation and trusted human decisions remain open.
 
 Goal: one bounded worker job can complete, recover, or report uncertain effects after a crash, and a human decision can gate it.
 
@@ -52,8 +53,9 @@ Acceptance:
 
 **Status: core communication implemented.** Reusable service-owned teams perform real lead/worker
 and worker/worker MCP exchanges in both provider directions. CLI/MCP inspection, bounded live
-watching, authoritative runtime activity, exact native IDs, and separate result verification work.
-Client-owned lead binding, native deep-link opening, and concurrent native turns remain open.
+watching, authoritative runtime activity, exact native IDs, lease-fenced turns, role-scoped MCP
+profiles, stable inbox reads, atomic commits, and separate result verification work. Client-owned
+lead binding, Desktop connectors, native deep-link opening, and concurrent native turns remain open.
 
 Goal: a main agent driven from an existing CLI/Desktop client can delegate to multiple workers that exchange bounded peer messages, with native links back into supported clients.
 
@@ -64,7 +66,9 @@ Acceptance:
 
 ## Milestone 5 — Multi-team policy and service-owned coordinator (later)
 
-**Status: partial.** The managed CLI scheduler already owns coordinator turns. Cross-team policies beyond current group grants, advanced ownership transfer, and dynamic delegation remain open.
+**Status: partial.** The managed CLI scheduler already owns coordinator turns and fails closed on
+scheduler health failure. Cross-team policies beyond current group grants, first-class assignments
+and decisions, budget reservations, advanced ownership transfer, and dynamic delegation remain open.
 
 Goal: support policy scoped across multiple teams in a group, and an optional service-hosted coordinator that can continue independently while its host is available.
 

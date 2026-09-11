@@ -69,9 +69,10 @@ template:
   runs watch RUN_ID --interval-ms 500 --timeout-seconds 300
 ```
 
-The existing stdio MCP connector exposes the same inspection operations. New tools are
-`runs_inspect`, `messages_list`, `messages_receive`, `messages_send`, and `runs_complete`.
-The three mutating tools require the credential-bound agent's active turn in that run.
+The existing stdio MCP connector exposes the same inspection operations through the observer
+profile. The agent profile exposes `agent_context_get`, `inbox_read`, `message_send`,
+`turn_commit`, and `result_propose` for leads. Mutating tools require a short-lived credential
+bound to the agent, run, turn, and current ownership epoch.
 They cannot register teams, expand limits, or confer human approval. Read access follows
 the credential's group grants; message recipients must belong to the same team.
 
@@ -90,9 +91,12 @@ an externally driven CLI session.
 Messages are committed before an acceptance receipt is returned. Send keys are scoped to
 run and sender; an identical resend returns the original receipt, while changed payloads
 under the same key fail. Replies must address the original sender in the same run.
-`messages_receive` acknowledges delivery, which is distinct from finishing the assignment.
-The lead can propose completion only after pending messages are received, other active turns
-settle, and each worker has reported to it. Native turn completion is verified separately.
+`inbox_read` returns the stable inputs claimed for the current lease and does not acknowledge
+them; repeated reads return the same snapshot. `message_send` stages an outgoing message.
+`turn_commit` atomically acknowledges claimed inputs and publishes staged messages. A successful
+`result_propose` also commits the lead's inputs and durable proposal atomically. The lead can
+propose completion only after pending messages are received, other active turns settle, and each
+worker has reported to it. Native turn completion is verified separately.
 The final run result still says `not_independently_verified`: it is an agent proposal, not proof
 of correctness or a human approval. A local administrator may run one exact-result verifier:
 
@@ -144,11 +148,14 @@ reconciliation of interrupted model/tool work and durable human decisions remain
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
 
-Database schema version 3 records initialization readiness in the same transaction as a
-successful fixture import or team creation. Failed first-time initialization may leave a
-schema file, but the service will not treat it as ready. Existing databases with records are
-migrated; an old empty database without readiness evidence needs an explicit valid import or
-team creation. No failed import deletes an existing database.
+Database schema version 5 records per-agent ownership epochs, short-lived turn leases, claimed
+turn inputs, staged messages, and durable run proposals. Initialization readiness is recorded in
+the same transaction as a successful fixture import or team creation. Failed first-time
+initialization may leave a schema file, but the service will not treat it as ready. Existing
+databases with records are migrated through schema version 5; old delivery receipts remain
+readable. New turns use lease-aware delivery and never restore acknowledge-on-read semantics. An
+old empty database without readiness evidence needs an explicit valid import or team creation.
+No failed import deletes an existing database.
 
 ## Repeat the live acceptance test
 

@@ -1,4 +1,4 @@
-# Architecture (proposed)
+# Architecture
 
 This document describes Agentisan's broader runtime design. The Rust implementation now includes
 the fixture registry, managed native CLI teams with persistent MCP messages, bounded invocations,
@@ -37,9 +37,20 @@ The main agent's job is to propose decomposition and integrate results; workers 
 
 A native session ID, thread ID, or subagent ID are **not interchangeable** — a native ID does not by itself grant authority to act. An MCP connection, client name, or working directory does not identify the calling conversation on its own; a trusted per-call or host binding is required. When binding is unavailable, the registry must mark it **unbound** rather than guess by inferring the newest matching session. Lifecycle callbacks (connect/disconnect/resume) can fire more than once, so registration and binding updates must be **idempotent**. A turn ending in a client is not proof that an agent process exited.
 
-## Messaging
+## Messaging and turn leases
 
-Authenticated CLI/MCP messages carry an idempotency/message ID, exact recipient, job/attempt ID, kind, correlation/reply-to reference, and artifact revision references. The sender is derived from the verified binding, never claimed by the caller. The service persists **acceptance before delivery**, and distinguishes accepted, delivered, job-completed, and result-accepted states separately. Workers receive only the context scoped to their job. Delivery uses a single persistent inbox/outbox domain — not fragile navigation of a native client's UI/window state — with cursors so a reconnecting client can replay missed events without re-executing already-applied work. There is no universal exactly-once guarantee for external side effects; unknown delivery or completion status triggers reconciliation, and retries are bounded to cases where they are safe.
+Authenticated messages carry an idempotency/message ID, exact recipient, job/attempt ID, kind, correlation/reply-to reference, and artifact revision references. The sender is derived from the verified binding, never claimed by the caller. Each native turn receives a short-lived lease credential bound to one agent, run, turn, and ownership epoch; a newer epoch fences stale writers. `inbox_read` returns the stable inputs claimed for that lease without acknowledging them. `message_send` stages an outbound message, and `turn_commit` atomically acknowledges claimed inputs and publishes staged messages. A successful lead `result_propose` commits its inputs and durable proposal atomically. The service distinguishes accepted, delivered, processed, job-completed, and result-accepted states separately. Workers receive only job-scoped context. There is no universal exactly-once guarantee for external side effects; unknown delivery or completion status triggers reconciliation, and retries are bounded to cases where they are safe.
+
+## MCP profiles
+
+The model-facing MCP surface is role-scoped. The **agent** profile exposes
+`agent_context_get`, `inbox_read`, `message_send`, `turn_commit`, and `result_propose` to a
+lead. The **observer** profile exposes bounded read-only inspection tools and cannot send,
+resume, approve, or execute. Connector and administrator operations remain outside model MCP:
+connectors claim delivery and report native state through a separate authenticated interface;
+administrators create teams, reconcile uncertain work, select verifiers, and record human
+decisions. First-class assignments, decisions, and budget reservations are design targets, not
+yet shipped agent tools.
 
 ## Budgets
 
@@ -62,3 +73,9 @@ Every agent is inspectable through both the CLI and MCP: activity, sent/received
 ## Infrastructure (initial)
 
 The initial deployment target is a single local background service, SQLite for persistence, and filesystem-based artifacts, alongside an isolated executor added before any code execution capability ships. An MCP subprocess connector is a thin transport and must not own the lifecycle of durable jobs — jobs must survive the connector process exiting. A powered-off or sleeping host cannot make progress; persisting data does not, by itself, make retrying an arbitrary external side effect safe.
+
+The worker scheduler is authoritative only while healthy. A scheduler failure fences active work
+and fails closed rather than leaving an HTTP process reporting stale activity. Verifier attempts
+are reserved durably; startup and lock recovery reconcile abandoned `running` reservations to an
+error state before another verification can proceed. A durable proposal remains inspectable and
+independently verifiable after native process failure or service restart.
