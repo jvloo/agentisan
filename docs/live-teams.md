@@ -7,8 +7,8 @@ Agentisan-managed worker sessions, not the providers' built-in subagent objects.
 
 The current profiles support consultation, planning, and review of supplied material. They
 disable shell, file-editing, native delegation, external apps, and unrelated MCP servers.
-Arbitrary coding tools, direct model-API workers, Windows CLI supervision, and verified
-human approvals are not implemented. Registry/inspection remains usable on Windows.
+Arbitrary coding tools, direct model-API workers, Windows CLI supervision, and authenticated native
+approval UI are not implemented. Registry and inspection remain usable on Windows.
 
 ## Create and run a team
 
@@ -171,6 +171,7 @@ the exact scope hash, artifact hash, and offered choice:
 ./target/debug/agentisan decisions inspect DECISION_ID
 ./target/debug/agentisan decisions resolve DECISION_ID \
   --scope-hash SHA256 --artifact-hash SHA256 --choice approve
+./target/debug/agentisan decisions invalidate DECISION_ID
 ```
 
 Resolution records the local OS administrator boundary; native authenticated human-interaction
@@ -211,6 +212,12 @@ sessions, and verifies all six lead/worker/peer routes plus stable, distinct nat
 The default acceptance profile uses Claude Sonnet and Codex Luna at low effort. Override
 `AGENTISAN_LIVE_CLAUDE_MODEL`, `AGENTISAN_LIVE_CODEX_MODEL`, or `AGENTISAN_LIVE_EFFORT` for a
 controlled comparison without editing the test.
+
+The latest committed validation used the default low-effort Sonnet/Luna profile. Both lead
+directions completed five native turns, two assignments, eleven persistent messages, all six
+checked communication routes, and three distinct native sessions, with no pending messages.
+See the [sanitized results](../validation/live-teams.md). Ordinary validation currently comprises
+62 tests; CI runs them on Linux, macOS, and Windows without model calls.
 
 ```sh
 AGENTISAN_LIVE_TESTS=1 \

@@ -1,5 +1,9 @@
 # Live Desktop inspection and result verification
 
+This focused scenario predates the final core-v2 protocol and remains evidence for Desktop
+readback and result-verification boundaries. See [live-teams.md](live-teams.md) for the latest
+schema-v7 cross-provider acceptance.
+
 Validated on macOS on 2026-09-11 (Asia/Kuala_Lumpur) with one Claude Haiku lead and two
 Codex Luna workers at low effort. The team implemented and reviewed a small pure Python
 function. It used five native CLI invocations, six agent messages, all six directed lead/worker

@@ -11,7 +11,7 @@ opening remain proposed. Rust is selected for the core
 
 ## Goals and non-goals
 
-Agentisan would expose **one local service** through two front ends — a **CLI toolkit** and an **MCP server** — that call the same underlying behavior. The runtime must not depend on any particular vendor's CLI or Desktop app to function. Native integrations (e.g., linking into an existing client's session) are optional adapters with explicit capabilities. Direct provider API workers are an intended path, with their own credentials and billing, independent of any native app.
+Agentisan exposes **one local service** through two front ends — a **CLI toolkit** and an **MCP server** — that call the same underlying behavior. The durable protocol and registry are provider-neutral; the current execution adapters use Claude Code and Codex CLI. Native integrations, such as linking into an existing client's session, remain optional adapters with explicit capabilities. Direct provider API workers are an intended path, with their own credentials and billing, independent of any native app.
 
 Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive multi-coordinator swarm. It starts with one active coordination owner per objective, 1-to-N delegation, and bounded peer messaging between workers. Recursive N-to-N delegation and cross-team automation are explicitly deferred.
 
@@ -51,9 +51,9 @@ The model-facing MCP surface is role-scoped. The **agent** profile exposes
 `turn_commit`; leads additionally receive `assignment_create` and `result_propose`. The
 **observer** profile exposes bounded read-only inspection tools and cannot send,
 resume, approve, or execute. Connector and administrator operations remain outside model MCP:
-connectors claim delivery and report native state through a separate authenticated interface;
+the service-owned native adapters claim delivery and report native state through internal callbacks;
 administrators create teams, reconcile unknown turns as no-effect after inspection, select
-verifiers, and resolve or invalidate exact decision revisions. A connector protocol, other effect
+verifiers, and resolve or invalidate exact decision revisions. Public connector APIs, other effect
 reconciliation outcomes, and provider token/cost reservations remain design targets.
 
 ## Budgets
@@ -89,11 +89,23 @@ approval.
 
 ## Inspection
 
-Every agent is inspectable through both the CLI and MCP: activity, sent/received messages, visible tool actions, artifacts, usage where the adapter exposes it, and explicit uncertainty markers. Private chain-of-thought is never exposed. A proposed `agentisan://agents/<agent-id>` link (and equivalent decision links) navigates to an inspection view after authorization — it never sends a message, grants approval, or resumes a session by being opened. Native deep links and native session resume are offered only where the underlying client actually supports them; API-backed workers get no invented native conversation identity. No secret or prompt text is placed in a URI.
+Credential-scoped CLI and observer MCP queries expose registered agents, authoritative run activity,
+the persistent message timeline, assignment and decision records, native turn IDs, captured output,
+artifacts, reported usage, verification receipts, and explicit uncertainty markers. Private
+chain-of-thought is never exposed. A proposed `agentisan://agents/<agent-id>` link, and equivalent
+decision links, would navigate to authorized inspection only; opening one must never send a message,
+grant approval, or resume work. Native deep links and active-writer handoff are not implemented.
+Future adapters may expose them only where the underlying client supplies exact identity and safe
+resume behavior. API-backed workers get no invented native conversation identity, and no secret or
+prompt text belongs in a URI.
 
 ## Infrastructure (initial)
 
-The initial deployment target is a single local background service, SQLite for persistence, and filesystem-based artifacts, alongside an isolated executor added before any code execution capability ships. An MCP subprocess connector is a thin transport and must not own the lifecycle of durable jobs — jobs must survive the connector process exiting. A powered-off or sleeping host cannot make progress; persisting data does not, by itself, make retrying an arbitrary external side effect safe.
+The current deployment is a single local service, SQLite persistence, filesystem artifacts, and a
+thin stdio MCP connector. The connector does not own durable-job lifecycle, so records survive it
+exiting. An isolated executor is required before code execution ships. A powered-off or sleeping
+host cannot make progress; persistence alone does not make retrying an arbitrary external side
+effect safe.
 
 The worker scheduler is authoritative only while healthy. A scheduler failure fences active work
 and fails closed rather than leaving an HTTP process reporting stale activity. Verifier attempts
