@@ -27,7 +27,9 @@ Acceptance:
 **Status: partial.** Native CLI turns, completion receipts, process deadlines/watchdog,
 interrupted-state recording, narrow inspected resume, deterministic exact-result verification
 receipts, durable proposals, lease fencing, and verifier reservation recovery are implemented.
-General effect reconciliation and trusted human decisions remain open.
+First-class assignment records, scoped decision requests and local administrator resolution, plus
+inspected no-effect reconciliation are implemented. Native human-authentication adapters and other
+effect outcomes remain open.
 
 Goal: one bounded worker job can complete, recover, or report uncertain effects after a crash, and a human decision can gate it.
 
@@ -67,8 +69,9 @@ Acceptance:
 ## Milestone 5 — Multi-team policy and service-owned coordinator (later)
 
 **Status: partial.** The managed CLI scheduler already owns coordinator turns and fails closed on
-scheduler health failure. Cross-team policies beyond current group grants, first-class assignments
-and decisions, budget reservations, advanced ownership transfer, and dynamic delegation remain open.
+scheduler health failure. First-class assignment and decision records now exist. Cross-team policies
+beyond current group grants, provider token/cost reservations, advanced ownership transfer, and
+dynamic delegation remain open.
 
 Goal: support policy scoped across multiple teams in a group, and an optional service-hosted coordinator that can continue independently while its host is available.
 

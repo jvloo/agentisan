@@ -119,7 +119,7 @@ fn assignment_args(run: &str) -> agentisan::assignments::CreateArgs {
         objective: "Review supplied function".into(),
         done_criteria: vec!["Provide executable regression evidence".into()],
         scope_hash: "a".repeat(64),
-        deadline: teams::now() + 90,
+        deadline_seconds: 90,
         turn_budget: 2,
         message_budget: 3,
         idempotency_key: "assign_a".into(),

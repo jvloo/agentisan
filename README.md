@@ -4,13 +4,14 @@
 
 Agentisan is a local toolkit for making groups of agent teams identifiable and inspectable
 from existing CLI and Desktop clients. Its longer-term goal is bounded collaboration across
-providers, with persistent work records and a future path for explicit human decisions.
+providers, with persistent work records and explicit human decision boundaries.
 
 **Current status: reusable native CLI teams (core-v2).** The Rust service can run a Claude lead with
 Codex workers and the reverse, with real peer-to-peer MCP messages and persistent native
 session IDs. Live execution currently supports macOS/Linux and consultation profiles;
-shell/file-editing tools are disabled. Human approval workflows, general job reconciliation,
-direct model-API workers, and native deep-link opening remain planned.
+shell/file-editing tools are disabled. First-class assignments, scoped human decision records,
+and inspected no-effect reconciliation are available; native approval UI adapters, general effect
+reconciliation, direct model-API workers, and native deep-link opening remain planned.
 
 Start with the [live-team guide](docs/live-teams.md) and either the
 [Claude-led](examples/claude-led-team.json) or [Codex-led](examples/codex-led-team.json)
@@ -39,6 +40,11 @@ configuration. The fixture walkthrough below exercises inspection without model 
 - Fail closed when the worker scheduler is unhealthy and recover abandoned verifier reservations.
 - Run an administrator-selected deterministic verifier against the exact proposed result and
   persist an accepted, rejected, or error receipt with result and verifier hashes.
+- Create bounded assignments with reserved turn/message slices and explicit lifecycle states.
+- Persist scoped human decision requests; only the trusted local CLI can inspect, resolve, or
+  invalidate them, and a blocking decision pauses only its dependent assignment.
+- Reconcile an interrupted turn as producing no effect after explicit inspection, then resume it
+  under a fresh lease without silently replaying uncertain work.
 
 Fixture bindings remain simulated. Managed bindings record IDs returned by configured native
 CLIs. `bound` identifies the provisioned credential; it does not independently authenticate
@@ -92,7 +98,7 @@ absolute path to the built `agentisan` executable, using arguments shaped like:
   "args": [
     "--endpoint", "http://127.0.0.1:7437",
     "--credential-file", "/absolute/path/to/inventory_reader.token",
-    "mcp"
+    "mcp", "--profile", "observer"
   ]
 }
 ```
@@ -100,7 +106,8 @@ absolute path to the built `agentisan` executable, using arguments shaped like:
 The enclosing configuration format depends on the client. The observer profile exposes `whoami`,
 `groups_list`, `teams_list`, `agents_list`, `agents_inspect`, `runs_inspect`, and `messages_list`
 for inspection. The agent profile exposes `agent_context_get`, `inbox_read`, `message_send`,
-`turn_commit`, and (for leads) `result_propose` during an active, short-lived turn lease. These
+`assignment_update`, `decision_request`, `turn_commit`, and, for leads, `assignment_create` and
+`result_propose` during an active, short-lived turn lease. These
 profiles do not expose shell execution, administrative registration, or human approval. Each
 connector has one explicitly provisioned credential;
 sharing it across conversations shares access and does not identify those conversations.

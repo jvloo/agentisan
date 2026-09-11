@@ -4,8 +4,9 @@ This document describes Agentisan's broader runtime design. The Rust implementat
 the fixture registry, managed native CLI teams with persistent MCP messages, bounded invocations,
 native session continuation, authoritative live inspection, and administrator-selected deterministic
 verification of exact proposed results. See the [live-team contract](live-teams.md) for what is
-implemented and its limits. Human approvals, general effect reconciliation, direct API adapters,
-and native deep-link opening remain proposed. Rust is selected for the core
+implemented and its limits. Scoped decision records and no-effect reconciliation are implemented;
+native human-interaction adapters, other effect outcomes, direct API adapters, and native deep-link
+opening remain proposed. Rust is selected for the core
 ([decision](decisions/0001-rust-core.md)); a general durable-execution engine remains undecided.
 
 ## Goals and non-goals
@@ -26,8 +27,10 @@ Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive
 The local service — not any model — owns:
 
 - The **registry**: canonical group/team/agent/job/attempt IDs, parentage, and separately-tracked exact native adapter/host/session/thread/agent bindings, version/capabilities, and connection freshness.
-- **Message and event persistence**, including idempotency keys and replayable cursors.
-- **Permissions and budgets**, enforced with atomic reservations.
+- **Message, claim, assignment, decision, and work-operation persistence**, including idempotency
+  keys and atomic publication. A general append-only event/cursor model remains planned.
+- **Permissions and budgets**, including root turn/message limits and atomic assignment slices.
+  Provider token/cost reservations remain planned.
 - **Job scheduling and attempts**, deterministically where possible — scheduling and policy decisions do not require a model call.
 - **Human decisions and artifacts**.
 
@@ -44,17 +47,24 @@ Authenticated messages carry an idempotency/message ID, exact recipient, job/att
 ## MCP profiles
 
 The model-facing MCP surface is role-scoped. The **agent** profile exposes
-`agent_context_get`, `inbox_read`, `message_send`, `turn_commit`, and `result_propose` to a
-lead. The **observer** profile exposes bounded read-only inspection tools and cannot send,
+`agent_context_get`, `inbox_read`, `message_send`, `assignment_update`, `decision_request`, and
+`turn_commit`; leads additionally receive `assignment_create` and `result_propose`. The
+**observer** profile exposes bounded read-only inspection tools and cannot send,
 resume, approve, or execute. Connector and administrator operations remain outside model MCP:
 connectors claim delivery and report native state through a separate authenticated interface;
-administrators create teams, reconcile uncertain work, select verifiers, and record human
-decisions. First-class assignments, decisions, and budget reservations are design targets, not
-yet shipped agent tools.
+administrators create teams, reconcile unknown turns as no-effect after inspection, select
+verifiers, and resolve or invalidate exact decision revisions. A connector protocol, other effect
+reconciliation outcomes, and provider token/cost reservations remain design targets.
 
 ## Budgets
 
-A root budget is shared across the main agent, workers, retries, review, and recovery for one objective. Reservations are atomic and made **before** a model call, so concurrent workers cannot overspend the same allowance; usage that comes back unknown stays reserved rather than assumed free. The service tracks max calls, wall-clock time, concurrency, message exchange counts, child delegation depth, and stagnation, so a budget cannot expand itself. Token accounting and cache hits are tracked separately from dollar cost. Enforcement of cancellation and usage caps depends on what each provider adapter actually supports — the service will not claim an exact bill cap or symmetric control over opaque native workers it cannot fully observe.
+A run has root invocation, message, and wall-clock limits. Creating an assignment atomically
+reserves bounded turn and message slices while retaining integration capacity for the lead; worker
+dispatch and messages charge that assignment. Assignments cannot enlarge the root allowance. Native
+usage and cache data are retained when reported, but missing usage is still only labeled unknown:
+provider token and dollar reservations are not implemented. Enforcement of cancellation and usage
+caps depends on what each provider adapter actually supports, so the service does not claim an exact
+bill cap or symmetric control over opaque native workers.
 
 This enforcement covers calls admitted by the service. A client-owned main agent may make calls outside that boundary: record usage when the host reports it and label missing coverage explicitly. Do not advertise a whole-workflow spending limit when the main agent or a worker can spend outside the service's control. Strict jobs must use adapters that supply their required controls or be rejected before dispatch. Reserve a bounded call allowance with appropriate headroom; a reservation alone is not a provider billing cap.
 
@@ -64,7 +74,13 @@ Each job gets its own permissions and an isolated writer workspace; a plain work
 
 ## Human decisions
 
-Every human decision is persisted with the evidence considered, the proposed action, its scope and artifact revision, the principal eligible to decide, and exactly one resolution. A trusted human interaction in the existing host or an authenticated decision mechanism can supply approval; a model calling an "approve" tool is not human consent. Existing authorizations are honored across restarts while their scope and validity remain applicable; a missing decision blocks only the dependent work, and silence is never treated as approval. A material change to the proposed action invalidates a prior approval. Cancellation distinguishes a cancellation *request* from a *confirmed* stop, and retains its receipt and any existing artifacts.
+An agent can request a decision with an exact scope hash, artifact hash, offered choices, and an
+optional dependent assignment. The request is staged until the turn commits. A model cannot resolve
+it. The trusted local CLI records one resolution under the local OS administrator boundary, rejects
+mismatched revisions or choices, and can explicitly invalidate a request or resolution. A blocking
+assignment decision pauses that worker without starving unrelated assignments. Native authenticated
+human-interaction adapters and general cancellation decisions remain future work; silence is never
+approval.
 
 ## Inspection
 

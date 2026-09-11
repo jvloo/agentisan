@@ -2,12 +2,17 @@
 
 ## Unreleased
 
-- Added core-v2 durable turn protocol: schema version 5, short-lived per-turn lease
+- Added core-v2 durable turn protocol: schema version 6, short-lived per-turn lease
   credentials, ownership epochs, stable inbox reads, staged sends, and atomic `turn_commit`.
 - Added role-scoped agent and observer MCP profiles and kept connector/admin operations outside
   the model-facing surface.
 - Persisted lead result proposals independently of native process completion so they remain
   inspectable and independently verifiable after failure or restart.
 - Added scheduler fail-closed health behavior and recovery of abandoned verifier reservations.
+- Added first-class assignments with reserved turn/message slices and explicit lifecycle updates.
+- Added scoped human decision requests with trusted local resolution/invalidation; blocking decisions
+  pause only their dependent worker.
+- Added inspected no-effect reconciliation for unknown turns and durable proposal verification after
+  native failure.
 - Clarified migration compatibility and current validation limits, including the terminal-only
   watcher assertion.

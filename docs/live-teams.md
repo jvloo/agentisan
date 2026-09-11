@@ -71,10 +71,12 @@ template:
 
 The existing stdio MCP connector exposes the same inspection operations through the observer
 profile. The agent profile exposes `agent_context_get`, `inbox_read`, `message_send`,
-`turn_commit`, and `result_propose` for leads. Mutating tools require a short-lived credential
+`assignment_update`, `decision_request`, `turn_commit`, and, for leads, `assignment_create` and
+`result_propose`. Mutating tools require a short-lived credential
 bound to the agent, run, turn, and current ownership epoch.
 They cannot register teams, expand limits, or confer human approval. Read access follows
-the credential's group grants; message recipients must belong to the same team.
+group grants for observer credentials; lease credentials can inspect only their own active identity.
+Message recipients must belong to the same team.
 
 Native session/thread IDs appear as soon as the native CLI reports them, and every resumed
 turn must return the same ID. The native CLI stores remain the normal user stores. Native
@@ -95,8 +97,9 @@ under the same key fail. Replies must address the original sender in the same ru
 them; repeated reads return the same snapshot. `message_send` stages an outgoing message.
 `turn_commit` atomically acknowledges claimed inputs and publishes staged messages. A successful
 `result_propose` also commits the lead's inputs and durable proposal atomically. The lead can
-propose completion only after pending messages are received, other active turns settle, and each
-worker has reported to it. Native turn completion is verified separately.
+create bounded assignments with reserved turn/message slices; assignees report them and the lead
+closes them. When assignments exist, completion requires all of them to be terminal. Legacy runs
+without assignments retain the earlier worker-report gate. Native turn completion is verified separately.
 The final run result still says `not_independently_verified`: it is an agent proposal, not proof
 of correctness or a human approval. A local administrator may run one exact-result verifier:
 
@@ -143,16 +146,37 @@ turn with unread messages, an administrator can inspect the cause, fix it, and e
 ```
 
 This narrow resume path keeps the original deadline, invocation count, and native IDs. It
-rejects exhausted deadlines, failed/unknown turns, and runs without unread messages. General
-reconciliation of interrupted model/tool work and durable human decisions remain future work.
+rejects exhausted deadlines, unresolved unknown turns, and runs without unread messages. After
+inspecting an unknown turn and confirming it produced no effect, a local administrator can run:
+
+```sh
+./target/debug/agentisan runs reconcile TURN_ID --no-effect --after-inspection
+./target/debug/agentisan runs resume RUN_ID --after-inspection
+```
+
+This never classifies or replays uncertain external effects automatically. Other outcomes still
+require a future reconciliation path.
+
+Agents may stage a scoped `decision_request`, but cannot resolve it. The trusted local CLI requires
+the exact scope hash, artifact hash, and offered choice:
+
+```sh
+./target/debug/agentisan decisions inspect DECISION_ID
+./target/debug/agentisan decisions resolve DECISION_ID \
+  --scope-hash SHA256 --artifact-hash SHA256 --choice approve
+```
+
+Resolution records the local OS administrator boundary; native authenticated human-interaction
+adapters remain future work.
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
 
-Database schema version 5 records per-agent ownership epochs, short-lived turn leases, claimed
-turn inputs, staged messages, and durable run proposals. Initialization readiness is recorded in
+Database schema version 6 records per-agent ownership epochs, short-lived turn leases, claimed
+turn inputs, staged messages and work operations, assignments, decisions, and durable run proposals.
+Initialization readiness is recorded in
 the same transaction as a successful fixture import or team creation. Failed first-time
 initialization may leave a schema file, but the service will not treat it as ready. Existing
-databases with records are migrated through schema version 5; old delivery receipts remain
+databases with records are migrated through schema version 6; old delivery receipts remain
 readable. New turns use lease-aware delivery and never restore acknowledge-on-read semantics. An
 old empty database without readiness evidence needs an explicit valid import or team creation.
 No failed import deletes an existing database.

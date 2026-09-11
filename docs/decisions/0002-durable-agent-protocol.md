@@ -19,8 +19,9 @@ observer, connector, or administrator trust boundary.
 
 Agentisan separates four surfaces:
 
-1. The core owns durable events, inbox cursors, assignments, proposals, decisions, budgets,
-   connector epochs, turn leases, and acceptance.
+1. The core owns durable messages, claimed inputs, assignments, proposals, decisions, assignment
+   budget slices, turn leases, and acceptance. A unified event/cursor store, provider usage
+   reservations, and connector epochs extend the same boundary in later migrations.
 2. Connectors claim delivery and receive a short-lived turn credential bound to one agent, run,
    turn, and ownership epoch. A newer epoch fences every older writer.
 3. Agent MCP tools operate only within that lease. Reading input does not acknowledge processing.
@@ -41,7 +42,8 @@ connection identity, recency, and native session ID alone never grant authority.
   evidence before the run continues.
 - A result proposal is immutable and remains inspectable even when the proposing native turn later
   fails or the service restarts.
-- Missing usage keeps its budget reservation held. Limits cannot be expanded by an agent or child.
+- Assignment slices cannot be expanded by an agent or child. Future provider-usage reservations
+  must remain held when usage is missing rather than treating it as free.
 - Deep links navigate to inspectable work; they never send, resume, approve, or transfer ownership.
 
 ## Consequences
