@@ -30,6 +30,7 @@ configuration. The fixture walkthrough below exercises inspection without model 
 | Human decisions | Agents can request a choice against exact scope and artifact hashes. Only the trusted local CLI can resolve or invalidate it; a blocking request pauses its dependent assignment. |
 | Recovery | Restarted in-flight work becomes explicit `unknown` state. No-effect reconciliation discards uncommitted staging, preserves already-committed effects, and requires an inspected resume. |
 | Inspection and acceptance | Running `agentisan` opens a live, read-only terminal dashboard. CLI and observer MCP retain credential-scoped machine interfaces. Result proposals survive native failure and remain separate from deterministic verification and human acceptance. |
+| Planning-chat control | A Codex Desktop or other MCP host can use a managed lead credential to start and inspect one service-owned team. The controller discloses that the host chat itself is not the managed lead session. |
 
 The latest live acceptance used Claude Sonnet and Codex Luna at low effort in both lead directions.
 Each topology completed five native turns, two assignments, eleven persistent messages, all six
@@ -41,8 +42,9 @@ required lead/worker/peer routes, and three distinct durable native sessions. Se
 - It does not guarantee exactly-once behavior for arbitrary external side effects.
 - Run, turn, and assignment limits are not provider token or billing caps.
 - Current managed workers cannot execute shell commands or edit project files.
-- Codex Desktop is a verified transcript inspection surface, not an authenticated active-writer
-  adapter; Claude Desktop integration is not shipped.
+- Codex Desktop can host the controller MCP profile and inspect completed Codex transcripts, but it
+  is not an authenticated active-writer adapter for the service-owned lead. Claude Desktop has not
+  been validated with this profile.
 - Additional provider adapters, direct model APIs, Windows CLI supervision, native approval UI,
   URI/deep-link handlers, concurrent native turns, and general effect reconciliation are not shipped.
 
@@ -58,6 +60,41 @@ cargo build --locked
 The [live-team guide](docs/live-teams.md#create-and-run-a-team) is the canonical runbook for
 private configuration, account authentication, `--live` authorization, bounded submission,
 inspection, model selection, and recovery.
+
+For the shortest CLI path after creating a team and starting the worker-enabled service:
+
+```sh
+agentisan run claude_team --objective "Review the plan and ask both specialists for evidence" --live
+```
+
+The command queues the service-owned lead and prints its run ID. Use `--prompt-file` for a longer
+objective. Only one active run per team is accepted.
+
+## Start a team from a Codex Desktop planning chat
+
+Configure a second stdio MCP connector with the managed lead token returned by `teams create`:
+
+```json
+{
+  "command": "/absolute/path/to/agentisan",
+  "args": [
+    "--endpoint", "http://127.0.0.1:7437",
+    "--credential-file", "/absolute/path/to/managed/claude_team/claude_lead.token",
+    "mcp", "--profile", "controller"
+  ]
+}
+```
+
+Run `agentisan serve --enable-cli-workers` separately. In the planning chat, refine the objective,
+then say: “Start the Agentisan team with this objective. Use the default limits and show me the
+run ID.” The chat calls `team_run_start`, then can follow the run through `runs_inspect` and
+`messages_list`. `live: true` is required because the start launches actual configured providers;
+the idempotency key makes an exact retry return the same run.
+
+The MCP credential selects one managed team. It does not prove which Codex Desktop conversation is
+calling it, so `controller_context_get` reports `chat_identity: not_asserted`. Agentisan launches a
+separate service-owned lead session for the run. This preserves a single coordination owner until a
+future host adapter can supply trustworthy per-conversation identity.
 
 ## View the team
 
@@ -162,6 +199,9 @@ for inspection. The agent profile exposes `agent_context_get`, `inbox_read`, `me
 profiles do not expose shell execution, administrative registration, or human approval. Each
 connector has one explicitly provisioned credential;
 sharing it across conversations shares access and does not identify those conversations.
+The controller profile exposes `controller_context_get`, `team_members_list`, `team_run_start`,
+`runs_inspect`, and `messages_list` for exactly one managed team. It cannot send messages as a team
+member, resolve decisions, change limits after launch, or execute commands.
 
 Agentisan's runtime state is authoritative while it owns a managed turn. A native Desktop client
 may render an externally driven CLI session as interrupted even while Agentisan records it as
@@ -218,8 +258,9 @@ cargo test --locked
 ```
 
 Ordinary tests cover query-only dashboard access, scrolled mouse selection, exact historical-run
-lookup, native-open safety, registry invariants, messaging/limits, CLI/HTTP/MCP parity,
-initialization locking, persistence, and Unix process deadlines. They make no model calls. The separate
+lookup, native-open safety, registry invariants, messaging/limits, CLI/HTTP/MCP parity, controller
+authorization and idempotency, initialization locking, persistence, and Unix process deadlines.
+They make no model calls. The separate
 [opt-in live test](docs/live-teams.md#repeat-the-live-acceptance-test) runs both provider
 topologies and verifies actual message routes and native session continuity. CI runs the
 ordinary checks on Linux, macOS, and Windows; Windows CLI execution is not supported yet.

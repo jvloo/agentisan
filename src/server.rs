@@ -1,6 +1,7 @@
 use crate::{
     model::Query,
     registry::{Registry, RegistryError},
+    teams::ControllerStartArgs,
 };
 use axum::{
     Json, Router,
@@ -45,6 +46,10 @@ impl SchedulerHealth {
         self.0.load(Ordering::Acquire) == SCHEDULER_FAILED
     }
 
+    fn is_running(&self) -> bool {
+        self.0.load(Ordering::Acquire) == SCHEDULER_RUNNING
+    }
+
     fn json(&self) -> Value {
         match self.0.load(Ordering::Acquire) {
             SCHEDULER_INSPECTION_ONLY => {
@@ -77,6 +82,24 @@ fn public_error(error: RegistryError) -> (StatusCode, Json<Value>) {
     }
 }
 
+fn bearer_token(headers: &HeaderMap) -> Result<Option<&str>, (StatusCode, Json<Value>)> {
+    let values: Vec<_> = headers.get_all("authorization").iter().collect();
+    match values.as_slice() {
+        [] => Ok(None),
+        [header] => {
+            let raw = header
+                .to_str()
+                .map_err(|_| public_error(RegistryError::Unauthorized))?;
+            Ok(Some(
+                raw.strip_prefix("Bearer ")
+                    .filter(|token| !token.is_empty())
+                    .ok_or_else(|| public_error(RegistryError::Unauthorized))?,
+            ))
+        }
+        _ => Err(public_error(RegistryError::Unauthorized)),
+    }
+}
+
 async fn inspect(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -90,21 +113,7 @@ async fn inspect(
             Json(json!({"error":"browser_origin_not_allowed"})),
         ));
     }
-    let values: Vec<_> = headers.get_all("authorization").iter().collect();
-    let token = match values.as_slice() {
-        [] => None,
-        [header] => {
-            let raw = header
-                .to_str()
-                .map_err(|_| public_error(RegistryError::Unauthorized))?;
-            Some(
-                raw.strip_prefix("Bearer ")
-                    .filter(|t| !t.is_empty())
-                    .ok_or_else(|| public_error(RegistryError::Unauthorized))?,
-            )
-        }
-        _ => return Err(public_error(RegistryError::Unauthorized)),
-    };
+    let token = bearer_token(&headers)?;
     let is_run_inspection = matches!(&query, Query::RunsInspect { .. });
     let mut value = state
         .registry
@@ -187,20 +196,61 @@ async fn team_action(
             Json(json!({"error":"scheduler_unavailable"})),
         ));
     }
-    let values: Vec<_> = headers.get_all("authorization").iter().collect();
-    let token = match values.as_slice() {
-        [h] => h
-            .to_str()
-            .ok()
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .filter(|v| !v.is_empty()),
-        _ => None,
-    }
-    .ok_or_else(|| public_error(RegistryError::Unauthorized))?;
+    let token = bearer_token(&headers)?.ok_or_else(|| public_error(RegistryError::Unauthorized))?;
     crate::teams::act(&state.registry, token, action)
         .await
         .map(Json)
         .map_err(public_action_error)
+}
+
+fn public_start_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if error
+        .downcast_ref::<RegistryError>()
+        .is_some_and(|value| matches!(value, RegistryError::Unauthorized))
+    {
+        return public_error(RegistryError::Unauthorized);
+    }
+    let detail = error.to_string();
+    let (status, code) = if detail.contains("controller credential must belong") {
+        (StatusCode::FORBIDDEN, "controller_forbidden")
+    } else if detail.contains("idempotency key reused") {
+        (StatusCode::CONFLICT, "idempotency_conflict")
+    } else if detail.contains("team already has an active run") {
+        (StatusCode::CONFLICT, "run_already_active")
+    } else if detail.contains("live authorization") {
+        (StatusCode::BAD_REQUEST, "live_authorization_required")
+    } else if detail.contains("invalid objective") || detail.contains("invalid idempotency") {
+        (StatusCode::BAD_REQUEST, "invalid_request")
+    } else if detail.contains("database") || detail.contains("SQL") {
+        (StatusCode::SERVICE_UNAVAILABLE, "runtime_unavailable")
+    } else {
+        (StatusCode::BAD_REQUEST, "start_rejected")
+    };
+    (status, Json(json!({"error":code})))
+}
+
+async fn controller_run_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<ControllerStartArgs>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if headers.contains_key("origin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"browser_origin_not_allowed"})),
+        ));
+    }
+    if !state.scheduler.is_running() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"scheduler_unavailable"})),
+        ));
+    }
+    let token = bearer_token(&headers)?.ok_or_else(|| public_error(RegistryError::Unauthorized))?;
+    crate::teams::start_as_controller(&state.registry, token, args)
+        .await
+        .map(Json)
+        .map_err(public_start_error)
 }
 
 pub fn router(registry: Registry) -> Router {
@@ -221,6 +271,7 @@ fn router_with_health(registry: Registry, scheduler: SchedulerHealth) -> Router 
         )
         .route("/v1/inspect", post(inspect))
         .route("/v1/team-action", post(team_action))
+        .route("/v1/controller/run-start", post(controller_run_start))
         // A 16 KiB semantic result may require 6x that space when JSON-escaped.
         .layer(axum::extract::DefaultBodyLimit::max(131_072))
         .with_state(AppState {
@@ -298,5 +349,80 @@ pub async fn serve(
                 Err(error) => Err(anyhow::anyhow!("worker scheduler task failed: {error}")),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        fixture,
+        model::{AgentRole, Group, Team},
+        teams::{MemberConfig, Provider, TeamConfig},
+    };
+
+    #[tokio::test]
+    async fn running_scheduler_accepts_controller_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("state");
+        let registry = Registry::open(&fixture::database_path(&data).unwrap())
+            .await
+            .unwrap();
+        crate::teams::create(
+            &registry,
+            &data,
+            &TeamConfig {
+                group: Group {
+                    id: "g".into(),
+                    name: "Group".into(),
+                },
+                team: Team {
+                    id: "t".into(),
+                    group_id: "g".into(),
+                    name: "Team".into(),
+                },
+                agents: vec![MemberConfig {
+                    id: "lead".into(),
+                    name: "Lead".into(),
+                    role: AgentRole::Lead,
+                    provider: Provider::Claude,
+                    executable: std::env::current_exe().unwrap(),
+                    model: "test".into(),
+                    effort: "low".into(),
+                    instructions: String::new(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let token = fixture::read_credential(&data.join("managed/t/lead.token")).unwrap();
+        let scheduler = SchedulerHealth::inspection_only();
+        scheduler.running();
+        let state = AppState {
+            registry: registry.clone(),
+            scheduler,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let result = controller_run_start(
+            State(state),
+            headers,
+            Json(ControllerStartArgs {
+                objective: "Execute the accepted plan".into(),
+                live: true,
+                idempotency_key: "desktop_start_1".into(),
+                max_turns: None,
+                max_messages: None,
+                timeout_seconds: None,
+                turn_timeout_seconds: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(result["team_id"], "t");
+        assert_eq!(result["state"], "queued");
+        assert_eq!(result["chat_identity"], "not_asserted");
+        registry.close().await;
     }
 }

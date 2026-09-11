@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -40,6 +40,23 @@ pub const SNAPSHOT_SCHEMA: &str = "
 ALTER TABLE turn_leases ADD COLUMN input_snapshot TEXT;
 PRAGMA user_version=7;
 ";
+
+pub const CONTROLLER_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS run_requests (
+    principal_id TEXT NOT NULL REFERENCES principals(id),
+    idempotency_key TEXT NOT NULL,
+    request TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id,idempotency_key)
+);
+PRAGMA user_version=8;
+";
+
+pub const DEFAULT_MAX_TURNS: u32 = 18;
+pub const DEFAULT_MAX_MESSAGES: u32 = 64;
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
+pub const DEFAULT_TURN_TIMEOUT_SECONDS: u64 = 120;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -85,6 +102,37 @@ pub struct TeamConfig {
     pub group: Group,
     pub team: Team,
     pub agents: Vec<MemberConfig>,
+}
+
+/// A controller starts the managed team associated with its credential. The
+/// MCP host conversation is deliberately not treated as a team member.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerStartArgs {
+    /// Work for the managed team, limited to 16 KiB.
+    pub objective: String,
+    /// Must be true to authorize actual provider calls.
+    pub live: bool,
+    /// Stable key for this logical start. Reuse only for an identical request.
+    pub idempotency_key: String,
+    /// Total managed turns; defaults to 18 and must be 1..100.
+    pub max_turns: Option<u32>,
+    /// Total team messages; defaults to 64 and must be 1..500.
+    pub max_messages: Option<u32>,
+    /// Run deadline in seconds; defaults to 900 and must be 1..3600.
+    pub timeout_seconds: Option<u64>,
+    /// Per-turn deadline in seconds; defaults to 120 and must be 1..300.
+    pub turn_timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NormalizedStart<'a> {
+    objective: &'a str,
+    live: bool,
+    max_turns: u32,
+    max_messages: u32,
+    timeout_seconds: u64,
+    turn_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +287,29 @@ pub async fn start(
     timeout: u64,
     turn_timeout: u64,
 ) -> Result<String> {
+    validate_start(objective, max_turns, max_messages, timeout, turn_timeout)?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let id = start_in_tx(
+        &mut tx,
+        team,
+        objective,
+        max_turns,
+        max_messages,
+        timeout,
+        turn_timeout,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+fn validate_start(
+    objective: &str,
+    max_turns: u32,
+    max_messages: u32,
+    timeout: u64,
+    turn_timeout: u64,
+) -> Result<()> {
     if objective.trim().is_empty()
         || objective.len() > 16384
         || !(1..=100).contains(&max_turns)
@@ -248,11 +319,23 @@ pub async fn start(
     {
         bail!("invalid objective or enforced limits");
     }
+    Ok(())
+}
+
+async fn start_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    team: &str,
+    objective: &str,
+    max_turns: u32,
+    max_messages: u32,
+    timeout: u64,
+    turn_timeout: u64,
+) -> Result<String> {
     let agents = sqlx::query(
         "SELECT m.config FROM team_members m JOIN agents a ON a.id=m.agent_id WHERE a.team_id=?",
     )
     .bind(team)
-    .fetch_all(&registry.pool)
+    .fetch_all(&mut **tx)
     .await?;
     let members: Vec<MemberConfig> = agents
         .iter()
@@ -263,16 +346,24 @@ pub async fn start(
         .find(|a| a.role == AgentRole::Lead)
         .ok_or_else(|| anyhow::anyhow!("managed team not found"))?;
     let id = new_id("run");
-    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("INSERT INTO runs(id,team_id,lead_id,state,objective,max_turns,max_messages,deadline,turn_timeout,created_at) VALUES(?,?,?,'queued',?,?,?,?,?,?)")
-        .bind(&id).bind(team).bind(lead.id.as_str()).bind(objective).bind(max_turns).bind(max_messages).bind(now()+timeout as i64).bind(turn_timeout as i64).bind(now()).execute(&mut *tx).await?;
+    let inserted = sqlx::query("INSERT INTO runs(id,team_id,lead_id,state,objective,max_turns,max_messages,deadline,turn_timeout,created_at) VALUES(?,?,?,'queued',?,?,?,?,?,?)")
+        .bind(&id).bind(team).bind(lead.id.as_str()).bind(objective).bind(max_turns).bind(max_messages).bind(now()+timeout as i64).bind(turn_timeout as i64).bind(now()).execute(&mut **tx).await;
+    if let Err(error) = inserted {
+        if error
+            .as_database_error()
+            .is_some_and(|value| value.is_unique_violation())
+        {
+            bail!("team already has an active run");
+        }
+        return Err(error.into());
+    }
     sqlx::query("INSERT INTO messages(id,run_id,sender,recipient,body,dedup_key,created_at) VALUES(?,?,'human',?,?,'initial-objective',?)")
-        .bind(new_id("msg")).bind(&id).bind(lead.id.as_str()).bind(objective).bind(now()).execute(&mut *tx).await?;
+        .bind(new_id("msg")).bind(&id).bind(lead.id.as_str()).bind(objective).bind(now()).execute(&mut **tx).await?;
     // A new objective gets fresh native sessions. Historical IDs remain in turns.
     for a in &members {
         let payload: String = sqlx::query_scalar("SELECT payload FROM agents WHERE id=?")
             .bind(a.id.as_str())
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
         let mut agent: Agent = serde_json::from_str(&payload)?;
         agent.native_binding.session_id = None;
@@ -281,11 +372,103 @@ pub async fn start(
             .bind(serde_json::to_string(&agent)?)
             .bind(format!("pending:{}", a.id.as_str()))
             .bind(a.id.as_str())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
     Ok(id)
+}
+
+pub async fn start_as_controller(
+    registry: &Registry,
+    token: &str,
+    args: ControllerStartArgs,
+) -> Result<Value> {
+    let principal = caller(registry, token).await?;
+    let agent_id = principal
+        .agent_id
+        .ok_or_else(|| anyhow::anyhow!("controller credential must belong to a managed lead"))?;
+    let row = sqlx::query("SELECT a.team_id,m.config FROM agents a JOIN team_members m ON m.agent_id=a.id WHERE a.id=?")
+        .bind(agent_id.as_str())
+        .fetch_optional(&registry.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("controller credential must belong to a managed lead"))?;
+    let member: MemberConfig = serde_json::from_str(row.get("config"))?;
+    if member.role != AgentRole::Lead {
+        bail!("controller credential must belong to a managed lead");
+    }
+    if !args.live {
+        bail!("live authorization is required");
+    }
+    if !valid_id(&args.idempotency_key) {
+        bail!("invalid idempotency key");
+    }
+    let team_id: String = row.get("team_id");
+    let normalized = NormalizedStart {
+        objective: &args.objective,
+        live: true,
+        max_turns: args.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
+        max_messages: args.max_messages.unwrap_or(DEFAULT_MAX_MESSAGES),
+        timeout_seconds: args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
+        turn_timeout_seconds: args
+            .turn_timeout_seconds
+            .unwrap_or(DEFAULT_TURN_TIMEOUT_SECONDS),
+    };
+    validate_start(
+        normalized.objective,
+        normalized.max_turns,
+        normalized.max_messages,
+        normalized.timeout_seconds,
+        normalized.turn_timeout_seconds,
+    )?;
+    let request = serde_json::to_string(&normalized)?;
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let prior = sqlx::query(
+        "SELECT q.request,q.run_id,r.state FROM run_requests q JOIN runs r ON r.id=q.run_id WHERE q.principal_id=? AND q.idempotency_key=?",
+    )
+    .bind(principal.id.as_str())
+    .bind(&args.idempotency_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(prior) = prior {
+        if prior.get::<String, _>("request") != request {
+            bail!("idempotency key reused for another run request");
+        }
+        return Ok(json!({
+            "run_id": prior.get::<String, _>("run_id"),
+            "team_id": team_id,
+            "state": prior.get::<String, _>("state"),
+            "duplicate": true,
+            "controller_identity": "managed_team_lead_credential",
+            "chat_identity": "not_asserted"
+        }));
+    }
+    let run_id = start_in_tx(
+        &mut tx,
+        &team_id,
+        normalized.objective,
+        normalized.max_turns,
+        normalized.max_messages,
+        normalized.timeout_seconds,
+        normalized.turn_timeout_seconds,
+    )
+    .await?;
+    sqlx::query("INSERT INTO run_requests(principal_id,idempotency_key,request,run_id,created_at) VALUES(?,?,?,?,?)")
+        .bind(principal.id.as_str())
+        .bind(&args.idempotency_key)
+        .bind(request)
+        .bind(&run_id)
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(json!({
+        "run_id": run_id,
+        "team_id": team_id,
+        "state": "queued",
+        "duplicate": false,
+        "controller_identity": "managed_team_lead_credential",
+        "chat_identity": "not_asserted"
+    }))
 }
 
 async fn caller(registry: &Registry, token: &str) -> Result<Principal, RegistryError> {

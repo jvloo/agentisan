@@ -14,6 +14,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",

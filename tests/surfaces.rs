@@ -266,6 +266,46 @@ async fn agent_mcp_reads_stable_input_and_commits_it_once() {
             .is_string()
     );
     mcp.child.kill().await.unwrap();
+
+    let mut controller = Mcp::start_at(
+        &endpoint,
+        Some(&temp.path().join("managed/managed/lead.token")),
+        "controller",
+    )
+    .await;
+    let catalog = controller.request("tools/list", json!({})).await;
+    let names: Vec<_> = catalog["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 5);
+    assert!(names.contains(&"team_run_start"));
+    let context = tool_json(&controller.call("controller_context_get", json!({})).await);
+    assert_eq!(context["team_id"], "managed");
+    assert_eq!(context["chat_identity"], "not_asserted");
+    let start = controller
+        .call(
+            "team_run_start",
+            json!({
+                "objective":"Another objective",
+                "live":true,
+                "idempotency_key":"desktop_1",
+                "max_turns":null,
+                "max_messages":null,
+                "timeout_seconds":null,
+                "turn_timeout_seconds":null
+            }),
+        )
+        .await;
+    assert_eq!(start["result"]["isError"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(start["result"]["content"][0]["text"].as_str().unwrap())
+            .unwrap()["error"]["code"],
+        "scheduler_unavailable"
+    );
+    controller.child.kill().await.unwrap();
     service.abort();
     registry.close().await;
 }
