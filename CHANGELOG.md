@@ -7,6 +7,7 @@
 - Added safe exact-session opening for released Claude Code and Codex CLI agents; active and
   unsupported Desktop targets fail closed.
 - Native chats opened from the dashboard now return to the same refreshed dashboard on exit.
+- Added `dashboard RUN_ID --agent AGENT_ID` for pre-filtered per-agent terminal views.
 - Added `agentisan dashboard [RUN_ID]` and `agentisan open RUN_ID AGENT_ID`; existing subcommands
   remain available for automation.
 - Added core-v2 durable turn protocol: schema version 7, short-lived per-turn lease

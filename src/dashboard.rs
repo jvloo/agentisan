@@ -135,7 +135,11 @@ impl Drop for MouseCapture {
 }
 
 impl App {
-    async fn new(data_dir: &Path, preferred_run: Option<&str>) -> Result<Self> {
+    async fn new(
+        data_dir: &Path,
+        preferred_run: Option<&str>,
+        preferred_agent: Option<&str>,
+    ) -> Result<Self> {
         let database = data_dir.join("registry.sqlite3");
         let registry = if database.is_file() {
             Some(Registry::open_read_only(&database).await?)
@@ -168,6 +172,16 @@ impl App {
                 .ok_or_else(|| anyhow::anyhow!("run not found in local dashboard"))?;
             app.run_list_state.select(Some(app.run_index));
             app.refresh().await;
+        }
+        if let Some(agent_id) = preferred_agent {
+            let index = app
+                .details
+                .agents
+                .iter()
+                .position(|agent| agent.id == agent_id)
+                .ok_or_else(|| anyhow::anyhow!("agent not found in selected dashboard run"))?;
+            app.agent_filter = Some(index);
+            app.agent_list_state.select(Some(index));
         }
         Ok(app)
     }
@@ -266,11 +280,15 @@ impl App {
     }
 }
 
-pub async fn run(data_dir: &Path, preferred_run: Option<&str>) -> Result<()> {
+pub async fn run(
+    data_dir: &Path,
+    preferred_run: Option<&str>,
+    preferred_agent: Option<&str>,
+) -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         bail!("the dashboard requires an interactive terminal; use agentisan --help for commands");
     }
-    let mut app = App::new(data_dir, preferred_run).await?;
+    let mut app = App::new(data_dir, preferred_run, preferred_agent).await?;
     let result = loop {
         let mut terminal = match ratatui::try_init().context("cannot initialize terminal dashboard")
         {
