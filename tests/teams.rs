@@ -299,6 +299,124 @@ async fn first_class_assignment_commits_atomically_and_only_assigned_work_blocks
 }
 
 #[tokio::test]
+async fn exhausted_assignment_does_not_starve_peers_and_can_use_bounded_admin_recovery() {
+    let (_temp, r, observers) = setup().await;
+    let run = teams::start(
+        &r,
+        "team",
+        "Exercise bounded assignment recovery",
+        10,
+        24,
+        120,
+        20,
+    )
+    .await
+    .unwrap();
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
+    let mut args = assignment_args(&run);
+    args.turn_budget = 1;
+    args.message_budget = 4;
+    let staged = work_act(&r, &lead, Action::AssignmentCreate(args))
+        .await
+        .unwrap();
+    let assignment_id = staged["assignment_id"].as_str().unwrap().to_owned();
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+
+    let worker = teams::next(&r).await.unwrap().unwrap();
+    assert_eq!(worker.agent.id.as_str(), "a");
+    read_work(&r, &worker).await;
+    work_act(
+        &r,
+        &worker,
+        Action::AssignmentUpdate(agentisan::assignments::UpdateArgs {
+            run_id: run.clone(),
+            assignment_id: assignment_id.clone(),
+            state: "reported".into(),
+            idempotency_key: "bounded_report".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    commit(&r, &worker).await;
+    teams::finish(&r, &worker, Ok(native_success()))
+        .await
+        .unwrap();
+
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    assert_eq!(lead.agent.id.as_str(), "lead");
+    read_work(&r, &lead).await;
+    send(
+        &r,
+        &fixture::read_credential(&lead.credential_file).unwrap(),
+        &run,
+        "a",
+        "blocked_followup",
+    )
+    .await;
+    send(
+        &r,
+        &fixture::read_credential(&lead.credential_file).unwrap(),
+        &run,
+        "b",
+        "independent_work",
+    )
+    .await;
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+
+    let independent = teams::next(&r).await.unwrap().unwrap();
+    assert_eq!(
+        independent.agent.id.as_str(),
+        "b",
+        "an exhausted assignment must not block a later deliverable recipient"
+    );
+    read_work(&r, &independent).await;
+    commit(&r, &independent).await;
+    teams::finish(&r, &independent, Ok(native_success()))
+        .await
+        .unwrap();
+
+    assert!(teams::next(&r).await.unwrap().is_none());
+    let stalled = teams::inspect_run(&r, &observers[0], &run).await.unwrap();
+    assert_eq!(stalled["state"], "stalled");
+    assert!(
+        stalled["error"]
+            .as_str()
+            .unwrap()
+            .contains("assignment limits")
+    );
+    let assignment = agentisan::assignments::inspect_assignment(&r, &assignment_id)
+        .await
+        .unwrap();
+    assert_eq!(assignment["turns_used"], 1);
+    assert_eq!(assignment["turn_budget"], 1);
+    assert!(
+        agentisan::assignments::extend_assignment(&r, &assignment_id, 65, 0, 0)
+            .await
+            .is_err()
+    );
+    let extended = agentisan::assignments::extend_assignment(&r, &assignment_id, 1, 0, 60)
+        .await
+        .unwrap();
+    assert_eq!(extended["root_limits"], "unchanged");
+    assert_eq!(extended["run_resume_required"], true);
+    teams::resume(&r, &run).await.unwrap();
+    let recovered = teams::next(&r).await.unwrap().unwrap();
+    assert_eq!(recovered.agent.id.as_str(), "a");
+    read_work(&r, &recovered).await;
+    commit(&r, &recovered).await;
+    teams::finish(&r, &recovered, Ok(native_success()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
     let (_temp, r, _t) = setup().await;
     let run = teams::start(&r, "team", "Request a human decision", 10, 16, 120, 20)

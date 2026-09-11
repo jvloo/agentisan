@@ -83,6 +83,11 @@ enum Command {
         #[command(subcommand)]
         command: DecisionsCommand,
     },
+    /// Trusted local inspection and bounded recovery of assignment records.
+    Assignments {
+        #[command(subcommand)]
+        command: AssignmentsCommand,
+    },
 }
 #[derive(Subcommand)]
 enum GroupsCommand {
@@ -176,6 +181,25 @@ enum DecisionsCommand {
     },
     Invalidate {
         decision_id: String,
+    },
+}
+#[derive(Subcommand)]
+enum AssignmentsCommand {
+    Inspect {
+        assignment_id: String,
+    },
+    /// Add capacity from the run's existing root limits after inspecting a stalled assignment.
+    Extend {
+        assignment_id: String,
+        #[arg(long, default_value_t = 0)]
+        add_turns: u32,
+        #[arg(long, default_value_t = 0)]
+        add_messages: u32,
+        /// Extend from now, capped by the original run deadline; zero leaves it unchanged.
+        #[arg(long, default_value_t = 0)]
+        deadline_seconds: u32,
+        #[arg(long)]
+        after_inspection: bool,
     },
 }
 #[derive(Subcommand)]
@@ -482,6 +506,43 @@ async fn run(cli: Cli) -> Result<()> {
                 "{}",
                 serde_json::json!({"decision_id":decision_id,"state":"invalidated"})
             );
+            return Ok(());
+        }
+        Command::Assignments {
+            command: AssignmentsCommand::Inspect { assignment_id },
+        } => {
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let value =
+                agentisan::assignments::inspect_assignment(&registry, &assignment_id).await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
+        Command::Assignments {
+            command:
+                AssignmentsCommand::Extend {
+                    assignment_id,
+                    add_turns,
+                    add_messages,
+                    deadline_seconds,
+                    after_inspection,
+                },
+        } => {
+            if !after_inspection {
+                bail!("inspect the assignment first, then acknowledge with --after-inspection");
+            }
+            let _lock = fixture::admin_lock(&cli.data_dir)?;
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let value = agentisan::assignments::extend_assignment(
+                &registry,
+                &assignment_id,
+                add_turns,
+                add_messages,
+                deadline_seconds,
+            )
+            .await?;
+            registry.close().await;
+            println!("{}", serde_json::to_string_pretty(&value)?);
             return Ok(());
         }
         Command::Agents {

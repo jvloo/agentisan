@@ -555,3 +555,101 @@ pub async fn inspect_decision(registry: &Registry, id: &str) -> Result<Value> {
         json!({"id":row.get::<String,_>("id"),"run_id":row.get::<String,_>("run_id"),"assignment_id":row.get::<Option<String>,_>("assignment_id"),"requester":row.get::<String,_>("requester"),"state":row.get::<String,_>("state"),"question":row.get::<String,_>("question"),"scope_hash":row.get::<String,_>("scope_hash"),"artifact_hash":row.get::<String,_>("artifact_hash"),"options":serde_json::from_str::<Value>(&row.get::<String,_>("options"))?,"blocking":row.get::<bool,_>("blocking"),"resolution":row.get::<Option<String>,_>("resolution"),"resolved_by":row.get::<Option<String>,_>("resolved_by"),"resolved_at":row.get::<Option<i64>,_>("resolved_at"),"created_at":row.get::<i64,_>("created_at")}),
     )
 }
+
+/// Inspect one published assignment through the trusted local administration surface.
+pub async fn inspect_assignment(registry: &Registry, id: &str) -> Result<Value> {
+    let row = sqlx::query("SELECT id,run_id,creator,assignee,parent_id,state,objective,done_criteria,scope_hash,deadline,turn_budget,message_budget,turns_used,messages_used,created_at FROM assignments WHERE id=? AND staged_turn IS NULL")
+        .bind(id)
+        .fetch_optional(&registry.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("assignment not found"))?;
+    Ok(json!({
+        "id":row.get::<String,_>("id"),
+        "run_id":row.get::<String,_>("run_id"),
+        "creator":row.get::<String,_>("creator"),
+        "assignee":row.get::<String,_>("assignee"),
+        "parent_id":row.get::<Option<String>,_>("parent_id"),
+        "state":row.get::<String,_>("state"),
+        "objective":row.get::<String,_>("objective"),
+        "done_criteria":serde_json::from_str::<Value>(&row.get::<String,_>("done_criteria"))?,
+        "scope_hash":row.get::<String,_>("scope_hash"),
+        "deadline":row.get::<i64,_>("deadline"),
+        "turn_budget":row.get::<i64,_>("turn_budget"),
+        "message_budget":row.get::<i64,_>("message_budget"),
+        "turns_used":row.get::<i64,_>("turns_used"),
+        "messages_used":row.get::<i64,_>("messages_used"),
+        "created_at":row.get::<i64,_>("created_at")
+    }))
+}
+
+/// Extend a stuck assignment only from capacity that remains inside the run's
+/// original root limits. The caller must hold the local administration lock.
+pub async fn extend_assignment(
+    registry: &Registry,
+    id: &str,
+    add_turns: u32,
+    add_messages: u32,
+    deadline_seconds: u32,
+) -> Result<Value> {
+    if (add_turns == 0 && add_messages == 0 && deadline_seconds == 0)
+        || add_turns > 64
+        || add_messages > 256
+        || (deadline_seconds != 0 && !(30..=3600).contains(&deadline_seconds))
+    {
+        bail!("assignment extension is outside the bounded range");
+    }
+    let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let assignment = sqlx::query("SELECT * FROM assignments WHERE id=? AND staged_turn IS NULL AND state NOT IN ('closed','expired','cancelled')")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("active assignment not found"))?;
+    let run_id: String = assignment.get("run_id");
+    let run = sqlx::query("SELECT * FROM runs WHERE id=?")
+        .bind(&run_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !["queued", "running", "stalled"].contains(&run.get::<String, _>("state").as_str())
+        || run.get::<i64, _>("deadline") <= now()
+    {
+        bail!("assignment run no longer accepts bounded recovery");
+    }
+    let reserved=sqlx::query("SELECT COALESCE(sum(turn_budget-turns_used),0) AS turns,COALESCE(sum(message_budget-messages_used),0) AS messages FROM assignments WHERE run_id=? AND staged_turn IS NULL AND state NOT IN ('closed','expired','cancelled')").bind(&run_id).fetch_one(&mut *tx).await?;
+    let sent: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE run_id=?")
+        .bind(&run_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    // Retain one unreserved integration turn and message for the lead, exactly
+    // as assignment creation does. This operation never enlarges root limits.
+    if reserved.get::<i64, _>("turns") + i64::from(add_turns) + 1
+        > run.get::<i64, _>("max_turns") - run.get::<i64, _>("turns")
+        || reserved.get::<i64, _>("messages") + i64::from(add_messages) + 1
+            > run.get::<i64, _>("max_messages") - sent
+    {
+        bail!("assignment extension exceeds remaining unreserved root budget");
+    }
+    let old_deadline: i64 = assignment.get("deadline");
+    let deadline = if deadline_seconds == 0 {
+        old_deadline
+    } else {
+        old_deadline.max((now() + i64::from(deadline_seconds)).min(run.get::<i64, _>("deadline")))
+    };
+    sqlx::query("UPDATE assignments SET turn_budget=turn_budget+?,message_budget=message_budget+?,deadline=? WHERE id=?")
+        .bind(i64::from(add_turns))
+        .bind(i64::from(add_messages))
+        .bind(deadline)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(json!({
+        "assignment_id":id,
+        "run_id":run_id,
+        "state":assignment.get::<String,_>("state"),
+        "turn_budget":assignment.get::<i64,_>("turn_budget") + i64::from(add_turns),
+        "message_budget":assignment.get::<i64,_>("message_budget") + i64::from(add_messages),
+        "deadline":deadline,
+        "root_limits":"unchanged",
+        "run_resume_required":run.get::<String,_>("state") == "stalled"
+    }))
+}

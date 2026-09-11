@@ -66,6 +66,10 @@ provider token and dollar reservations are not implemented. Enforcement of cance
 caps depends on what each provider adapter actually supports, so the service does not claim an exact
 bill cap or symmetric control over opaque native workers.
 
+The scheduler skips a recipient whose assignment deadline or reserved turn slice is exhausted, so
+other assignments and lead work continue. A trusted local administrator may extend that assignment
+after inspection, but only by reserving capacity still available inside the original root limits.
+
 This enforcement covers calls admitted by the service. A client-owned main agent may make calls outside that boundary: record usage when the host reports it and label missing coverage explicitly. Do not advertise a whole-workflow spending limit when the main agent or a worker can spend outside the service's control. Strict jobs must use adapters that supply their required controls or be rejected before dispatch. Reserve a bounded call allowance with appropriate headroom; a reservation alone is not a provider billing cap.
 
 ## Execution boundaries

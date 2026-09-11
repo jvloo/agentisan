@@ -651,9 +651,48 @@ async fn record_binding_owned(
 
 pub async fn next(registry: &Registry) -> Result<Option<Work>> {
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("UPDATE runs SET state='exhausted',error='run deadline reached' WHERE state IN ('queued','running') AND deadline<=?").bind(now()).execute(&mut *tx).await?;
-    let row=sqlx::query("SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload FROM runs r JOIN messages m ON m.run_id=r.id JOIN team_members tm ON tm.agent_id=m.recipient JOIN agents a ON a.id=tm.agent_id WHERE r.state IN ('queued','running') AND m.delivered_turn IS NULL AND m.staged_turn IS NULL AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d LEFT JOIN assignments da ON da.id=d.assignment_id WHERE d.run_id=r.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1 AND (d.assignment_id IS NULL OR da.assignee=m.recipient)) ORDER BY m.seq LIMIT 1").fetch_optional(&mut *tx).await?;
+    let current = now();
+    sqlx::query("UPDATE runs SET state='exhausted',error='run deadline reached' WHERE state IN ('queued','running') AND deadline<=?").bind(current).execute(&mut *tx).await?;
+    let row = sqlx::query(
+        "SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload
+         FROM runs r
+         JOIN messages m ON m.run_id=r.id
+         JOIN team_members tm ON tm.agent_id=m.recipient
+         JOIN agents a ON a.id=tm.agent_id
+         WHERE r.state IN ('queued','running')
+           AND m.delivered_turn IS NULL AND m.staged_turn IS NULL
+           AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running')
+           AND NOT EXISTS(
+             SELECT 1 FROM decisions d LEFT JOIN assignments da ON da.id=d.assignment_id
+             WHERE d.run_id=r.id AND d.staged_turn IS NULL AND d.state='requested'
+               AND d.blocking=1 AND (d.assignment_id IS NULL OR da.assignee=m.recipient)
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM assignments wa
+             WHERE wa.run_id=r.id AND wa.assignee=m.recipient AND wa.staged_turn IS NULL
+               AND wa.state NOT IN ('closed','expired','cancelled')
+               AND (wa.deadline<=? OR wa.turns_used>=wa.turn_budget)
+           )
+         ORDER BY m.seq LIMIT 1",
+    )
+    .bind(current)
+    .fetch_optional(&mut *tx)
+    .await?;
     let Some(row) = row else {
+        sqlx::query(
+            "UPDATE runs SET state='stalled',error='pending work is blocked by assignment limits; inspect and extend the assignment within the original root limits'
+             WHERE state='running'
+               AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.state='running')
+               AND EXISTS(
+                 SELECT 1 FROM messages m JOIN assignments a ON a.run_id=m.run_id AND a.assignee=m.recipient
+                 WHERE m.run_id=runs.id AND m.delivered_turn IS NULL AND m.staged_turn IS NULL
+                   AND a.staged_turn IS NULL AND a.state NOT IN ('closed','expired','cancelled')
+                   AND (a.deadline<=? OR a.turns_used>=a.turn_budget)
+               )",
+        )
+        .bind(current)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("UPDATE runs SET state='stalled',error='no pending messages and lead has not completed' WHERE state='running' AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.run_id=runs.id AND m.delivered_turn IS NULL AND m.staged_turn IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.run_id=runs.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1)").execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(None);

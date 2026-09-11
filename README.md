@@ -41,6 +41,8 @@ configuration. The fixture walkthrough below exercises inspection without model 
 - Run an administrator-selected deterministic verifier against the exact proposed result and
   persist an accepted, rejected, or error receipt with result and verifier hashes.
 - Create bounded assignments with reserved turn/message slices and explicit lifecycle states.
+- Skip recipients whose assignment slice is exhausted so independent work can continue; a trusted
+  local administrator can extend a stalled assignment only within the run's original root limits.
 - Persist scoped human decision requests; only the trusted local CLI can inspect, resolve, or
   invalidate them, and a blocking decision pauses only its dependent assignment.
 - Reconcile an interrupted turn as producing no effect after explicit inspection, then resume it

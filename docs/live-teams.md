@@ -168,6 +168,20 @@ the exact scope hash, artifact hash, and offered choice:
 
 Resolution records the local OS administrator boundary; native authenticated human-interaction
 adapters remain future work.
+
+An exhausted or expired assignment does not block messages for other recipients. If its pending
+work is the only remaining work, the run stalls without consuming another provider call. Inspect
+the exact assignment, then allocate additional capacity from the unchanged root limits and resume:
+
+```sh
+./target/debug/agentisan assignments inspect ASSIGNMENT_ID
+./target/debug/agentisan assignments extend ASSIGNMENT_ID \
+  --add-turns 1 --deadline-seconds 120 --after-inspection
+./target/debug/agentisan runs resume RUN_ID --after-inspection
+```
+
+The extension cannot enlarge the run's invocation, message, or wall-clock limit. If the root has
+no remaining capacity, the work remains stalled for explicit reconciliation.
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
 

@@ -28,8 +28,8 @@ Acceptance:
 interrupted-state recording, narrow inspected resume, deterministic exact-result verification
 receipts, durable proposals, lease fencing, and verifier reservation recovery are implemented.
 First-class assignment records, scoped decision requests and local administrator resolution, plus
-inspected no-effect reconciliation are implemented. Native human-authentication adapters and other
-effect outcomes remain open.
+inspected no-effect reconciliation and bounded assignment recovery are implemented. Native
+human-authentication adapters and other effect outcomes remain open.
 
 Goal: one bounded worker job can complete, recover, or report uncertain effects after a crash, and a human decision can gate it.
 
