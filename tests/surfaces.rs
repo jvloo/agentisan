@@ -1,4 +1,11 @@
 //! Exercise the actual binary, HTTP boundary, and MCP stdio protocol without model calls.
+use agentisan::{
+    fixture,
+    model::{AgentRole, Group, Team},
+    registry::Registry,
+    server,
+    teams::{self, MemberConfig, Provider, TeamConfig},
+};
 use serde_json::{Value, json};
 use std::{path::PathBuf, process::Stdio, time::Duration};
 use tempfile::TempDir;
@@ -106,8 +113,17 @@ struct Mcp {
 }
 impl Mcp {
     async fn start(demo: &Demo, principal: Option<&str>, profile: &str) -> Self {
-        let mut child = demo
-            .command(principal)
+        let credential = principal.map(|value| demo.credential(value));
+        Self::start_at(&demo.endpoint, credential.as_deref(), profile).await
+    }
+
+    async fn start_at(endpoint: &str, credential: Option<&std::path::Path>, profile: &str) -> Self {
+        let mut command = Command::new(BIN);
+        command.args(["--endpoint", endpoint]);
+        if let Some(path) = credential {
+            command.arg("--credential-file").arg(path);
+        }
+        let mut child = command
             .args(["mcp", "--profile", profile])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -162,6 +178,96 @@ impl Mcp {
         self.request("tools/call", json!({"name":name,"arguments":arguments}))
             .await
     }
+}
+
+#[tokio::test]
+async fn agent_mcp_reads_stable_input_and_commits_it_once() {
+    let temp = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let registry = Registry::open(&fixture::database_path(temp.path()).unwrap())
+        .await
+        .unwrap();
+    teams::create(
+        &registry,
+        temp.path(),
+        &TeamConfig {
+            group: Group {
+                id: "managed".into(),
+                name: "Managed".into(),
+            },
+            team: Team {
+                id: "managed".into(),
+                group_id: "managed".into(),
+                name: "Managed".into(),
+            },
+            agents: vec![MemberConfig {
+                id: "lead".into(),
+                name: "Lead".into(),
+                role: AgentRole::Lead,
+                provider: Provider::Claude,
+                executable: std::env::current_exe().unwrap(),
+                model: "test".into(),
+                effort: "low".into(),
+                instructions: String::new(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let observer =
+        fixture::read_credential(&temp.path().join("managed/managed/lead.token")).unwrap();
+    let run = teams::start(&registry, "managed", "MCP input", 2, 2, 60, 10)
+        .await
+        .unwrap();
+    let work = teams::next(&registry).await.unwrap().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let service_registry = registry.clone();
+    let service = tokio::spawn(async move {
+        axum::serve(listener, server::router(service_registry))
+            .await
+            .unwrap();
+    });
+    let mut mcp = Mcp::start_at(&endpoint, Some(&work.credential_file), "agent").await;
+
+    let context = tool_json(&mcp.call("agent_context_get", json!({})).await);
+    assert_eq!(context["identity"]["evidence"], "turn_lease");
+    assert_eq!(context["identity"]["lease"]["run_id"], run);
+    let first = tool_json(&mcp.call("inbox_read", json!({"run_id":run})).await);
+    let second = tool_json(&mcp.call("inbox_read", json!({"run_id":run})).await);
+    assert_eq!(first, second);
+    assert_eq!(first["messages"][0]["from"], "human");
+    assert!(
+        teams::messages(&registry, &observer, &run).await.unwrap()["messages"][0]["delivered_turn"]
+            .is_null()
+    );
+    let commit = tool_json(
+        &mcp.call(
+            "turn_commit",
+            json!({"run_id":run,"idempotency_key":"commit_once"}),
+        )
+        .await,
+    );
+    let repeated = tool_json(
+        &mcp.call(
+            "turn_commit",
+            json!({"run_id":run,"idempotency_key":"commit_once"}),
+        )
+        .await,
+    );
+    assert_eq!(commit, repeated);
+    assert_eq!(commit["status"], "committed");
+    assert!(
+        teams::messages(&registry, &observer, &run).await.unwrap()["messages"][0]["delivered_turn"]
+            .is_string()
+    );
+    mcp.child.kill().await.unwrap();
+    service.abort();
+    registry.close().await;
 }
 fn tool_json(response: &Value) -> Value {
     assert_ne!(response["result"]["isError"], true, "{response}");

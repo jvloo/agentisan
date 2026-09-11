@@ -524,6 +524,49 @@ fn native_success() -> agentisan::worker::TurnResult {
 }
 
 #[tokio::test]
+async fn turn_lease_identity_is_scoped_below_observer_access() {
+    let (_temp, registry, _tokens) = setup().await;
+    let run = teams::start(&registry, "team", "Scoped work", 4, 8, 120, 20)
+        .await
+        .unwrap();
+    let work = teams::next(&registry).await.unwrap().unwrap();
+    let lease = fixture::read_credential(&work.credential_file).unwrap();
+    let identity = registry
+        .inspect(Some(&lease), Query::Whoami {})
+        .await
+        .unwrap();
+    assert_eq!(identity["evidence"], "turn_lease");
+    assert_eq!(identity["lease"]["run_id"], run);
+    assert_eq!(identity["lease"]["turn_id"], work.turn_id);
+    assert!(
+        registry
+            .inspect(
+                Some(&lease),
+                Query::AgentsInspect {
+                    agent_id: "lead".into()
+                }
+            )
+            .await
+            .is_ok()
+    );
+    for query in [
+        Query::GroupsList {},
+        Query::AgentsInspect {
+            agent_id: "a".into(),
+        },
+        Query::RunsInspect {
+            run_id: run.clone(),
+        },
+        Query::MessagesList {
+            run_id: run.clone(),
+        },
+    ] {
+        assert!(registry.inspect(Some(&lease), query).await.is_err());
+    }
+    registry.close().await;
+}
+
+#[tokio::test]
 async fn lost_read_response_does_not_acknowledge_and_commit_publishes_atomically() {
     let (_temp, r, observers) = setup().await;
     let run = teams::start(&r, "team", "Review", 8, 16, 120, 20)
