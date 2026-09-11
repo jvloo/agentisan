@@ -93,8 +93,10 @@ an externally driven CLI session.
 Messages are committed before an acceptance receipt is returned. Send keys are scoped to
 run and sender; an identical resend returns the original receipt, while changed payloads
 under the same key fail. Replies must address the original sender in the same run.
-`inbox_read` returns the stable inputs claimed for the current lease and does not acknowledge
-them; repeated reads return the same snapshot. `message_send` stages an outgoing message.
+`inbox_read` stores and returns one stable snapshot of messages, assignments, and decisions but
+does not acknowledge them; repeated reads return the same snapshot even if an administrator
+updates work records meanwhile. Those updates appear on a later turn. `message_send` stages an
+outgoing message.
 `turn_commit` atomically acknowledges claimed inputs and publishes staged messages. A successful
 `result_propose` also commits the lead's inputs and durable proposal atomically. The lead can
 create bounded assignments with reserved turn/message slices; assignees report them and the lead
@@ -156,8 +158,11 @@ inspecting an unknown turn and confirming it produced no effect, a local adminis
 ./target/debug/agentisan runs resume RUN_ID --after-inspection
 ```
 
-This never classifies or replays uncertain external effects automatically. Other outcomes still
-require a future reconciliation path.
+For an uncommitted turn, no-effect reconciliation discards its private staged work and redelivers
+its inputs. For a turn that already committed before native completion, it preserves the published
+messages, assignment changes, decisions, proposal, and acknowledged inputs, and reconciles only the
+unrecorded native effect. This never classifies or replays uncertain external effects automatically.
+Other outcomes still require a future reconciliation path.
 
 Agents may stage a scoped `decision_request`, but cannot resolve it. The trusted local CLI requires
 the exact scope hash, artifact hash, and offered choice:
@@ -187,12 +192,13 @@ no remaining capacity, the work remains stalled for explicit reconciliation.
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
 
-Database schema version 6 records per-agent ownership epochs, short-lived turn leases, claimed
-turn inputs, staged messages and work operations, assignments, decisions, and durable run proposals.
+Database schema version 7 records per-agent ownership epochs, short-lived turn leases, complete
+input snapshots, claimed turn inputs, staged messages and work operations, assignments, decisions,
+and durable run proposals.
 Initialization readiness is recorded in
 the same transaction as a successful fixture import or team creation. Failed first-time
 initialization may leave a schema file, but the service will not treat it as ready. Existing
-databases with records are migrated through schema version 6; old delivery receipts remain
+databases with records are migrated through schema version 7; old delivery receipts remain
 readable. New turns use lease-aware delivery and never restore acknowledge-on-read semantics. An
 old empty database without readiness evidence needs an explicit valid import or team creation.
 No failed import deletes an existing database.

@@ -36,6 +36,11 @@ INSERT INTO run_proposals(run_id,turn_id,agent_id,result,created_at) SELECT r.id
 PRAGMA user_version=5;
 ";
 
+pub const SNAPSHOT_SCHEMA: &str = "
+ALTER TABLE turn_leases ADD COLUMN input_snapshot TEXT;
+PRAGMA user_version=7;
+";
+
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -478,11 +483,16 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
             }
         }
         Action::Receive { .. } => {
-            let rows=sqlx::query("SELECT m.* FROM messages m JOIN turn_inputs i ON i.message_id=m.id WHERE i.turn_id=? ORDER BY m.seq").bind(&turn).fetch_all(&mut *tx).await?;
-            sqlx::query("UPDATE turn_leases SET observed_at=COALESCE(observed_at,?) WHERE turn_id=? AND state='active'")
-                .bind(now()).bind(&turn).execute(&mut *tx).await?;
-            let work = crate::assignments::inbox_context(&mut tx, &actor).await?;
-            json!({"lease_id":turn,"ownership_epoch":lease.get::<i64,_>("epoch"),"messages":rows.iter().map(message_json).collect::<Vec<_>>(),"work":work})
+            if let Some(snapshot) = lease.get::<Option<String>, _>("input_snapshot") {
+                serde_json::from_str(&snapshot)?
+            } else {
+                let rows=sqlx::query("SELECT m.* FROM messages m JOIN turn_inputs i ON i.message_id=m.id WHERE i.turn_id=? ORDER BY m.seq").bind(&turn).fetch_all(&mut *tx).await?;
+                let work = crate::assignments::inbox_context(&mut tx, &actor).await?;
+                let snapshot = json!({"lease_id":turn,"ownership_epoch":lease.get::<i64,_>("epoch"),"messages":rows.iter().map(message_json).collect::<Vec<_>>(),"work":work});
+                sqlx::query("UPDATE turn_leases SET observed_at=COALESCE(observed_at,?),input_snapshot=? WHERE turn_id=? AND state='active' AND input_snapshot IS NULL")
+                    .bind(now()).bind(serde_json::to_string(&snapshot)?).bind(&turn).execute(&mut *tx).await?;
+                snapshot
+            }
         }
         Action::Commit {
             idempotency_key, ..
@@ -899,14 +909,19 @@ pub async fn reconcile_no_effect(registry: &Registry, turn_id: &str) -> Result<V
         bail!("invalid turn identity");
     }
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row=sqlx::query("SELECT t.run_id,r.state AS run_state,r.deadline,r.turns,r.max_turns FROM turns t JOIN runs r ON r.id=t.run_id JOIN turn_leases l ON l.turn_id=t.id WHERE t.id=? AND t.state='unknown' AND r.state='interrupted' AND l.state='fenced'").bind(turn_id).fetch_optional(&mut *tx).await?.ok_or_else(||anyhow::anyhow!("unknown turn is not available for no-effect reconciliation"))?;
-    crate::assignments::discard(&mut tx, turn_id).await?;
-    sqlx::query("DELETE FROM messages WHERE staged_turn=?")
-        .bind(turn_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE turns SET state='reconciled_no_effect',ended_at=COALESCE(ended_at,?),error='administrator confirmed no effect after inspection' WHERE id=?")
-        .bind(now()).bind(turn_id).execute(&mut *tx).await?;
+    let row=sqlx::query("SELECT t.run_id,r.state AS run_state,r.deadline,r.turns,r.max_turns,l.state AS lease_state FROM turns t JOIN runs r ON r.id=t.run_id JOIN turn_leases l ON l.turn_id=t.id WHERE t.id=? AND t.state='unknown' AND r.state='interrupted' AND l.state IN ('fenced','committed')").bind(turn_id).fetch_optional(&mut *tx).await?.ok_or_else(||anyhow::anyhow!("unknown turn is not available for no-effect reconciliation"))?;
+    let committed = row.get::<String, _>("lease_state") == "committed";
+    if !committed {
+        crate::assignments::discard(&mut tx, turn_id).await?;
+        sqlx::query("DELETE FROM messages WHERE staged_turn=?")
+            .bind(turn_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("UPDATE turns SET state='reconciled_no_effect',ended_at=COALESCE(ended_at,?),error=? WHERE id=?")
+        .bind(now())
+        .bind(if committed {"administrator confirmed no unrecorded native effect after inspection; committed effects preserved"} else {"administrator confirmed no effect after inspection"})
+        .bind(turn_id).execute(&mut *tx).await?;
     let run_id: String = row.get("run_id");
     let pending:i64=sqlx::query_scalar("SELECT count(*) FROM messages WHERE run_id=? AND delivered_turn IS NULL AND staged_turn IS NULL").bind(&run_id).fetch_one(&mut *tx).await?;
     let resumable = pending > 0
@@ -924,7 +939,7 @@ pub async fn reconcile_no_effect(registry: &Registry, turn_id: &str) -> Result<V
         .await?;
     tx.commit().await?;
     Ok(
-        json!({"turn_id":turn_id,"run_id":run_id,"outcome":"no_effect","run_state":if resumable{"stalled"}else{"failed"},"resumable":resumable}),
+        json!({"turn_id":turn_id,"run_id":run_id,"outcome":"no_effect","committed_effects_preserved":committed,"run_state":if resumable{"stalled"}else{"failed"},"resumable":resumable}),
     )
 }
 

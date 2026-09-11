@@ -33,8 +33,8 @@ configuration. The fixture walkthrough below exercises inspection without model 
 - Stream authoritative run snapshots with a bounded, read-only CLI watch command.
 - Issue short-lived per-turn lease credentials fenced by agent ownership epochs.
 - Separate agent and observer MCP profiles; observer credentials are read-only.
-- Read a stable inbox snapshot without acknowledgement; stage sends and publish them with
-  an atomic `turn_commit` (a successful lead proposal commits its inputs atomically).
+- Read a stable message, assignment, and decision snapshot without acknowledgement; stage sends
+  and publish them with an atomic `turn_commit` (a successful lead proposal commits its inputs atomically).
 - Persist result proposals independently of native turn success so they can be verified after
   a process failure or service restart.
 - Fail closed when the worker scheduler is unhealthy and recover abandoned verifier reservations.

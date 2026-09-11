@@ -24,8 +24,9 @@ Agentisan separates four surfaces:
    reservations, and connector epochs extend the same boundary in later migrations.
 2. Connectors claim delivery and receive a short-lived turn credential bound to one agent, run,
    turn, and ownership epoch. A newer epoch fences every older writer.
-3. Agent MCP tools operate only within that lease. Reading input does not acknowledge processing.
-   `turn_commit` is the atomic boundary that advances the inbox cursor and publishes staged work.
+3. Agent MCP tools operate only within that lease. The first read stores the complete message and
+   work snapshot; later reads return it unchanged and do not acknowledge processing. `turn_commit`
+   is the atomic boundary that advances the inbox cursor and publishes staged work.
 4. Observer MCP tools are read-only. Administrative cancellation, reconciliation, verification,
    human decisions, and binding changes remain outside the model-facing MCP surface.
 
@@ -40,6 +41,8 @@ connection identity, recency, and native session ID alone never grant authority.
   result proposal, deterministic verification, and human acceptance are distinct records.
 - An uncertain native effect is never replayed automatically. An administrator reconciles it with
   evidence before the run continues.
+- Restart reconciliation distinguishes an uncommitted turn, whose private staged work is discarded,
+  from a committed turn, whose published effects remain authoritative.
 - A result proposal is immutable and remains inspectable even when the proposing native turn later
   fails or the service restarts.
 - Assignment slices cannot be expanded by an agent or child. Future provider-usage reservations

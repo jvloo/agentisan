@@ -68,7 +68,7 @@ impl Registry {
             0 => {
                 sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
             }
-            1..=6 => {}
+            1..=7 => {}
             _ => {
                 return Err(RegistryError::Invalid(
                     "unsupported database schema version".into(),
@@ -95,6 +95,11 @@ impl Registry {
         }
         if version < 6 {
             sqlx::raw_sql(crate::assignments::SCHEMA)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if version < 7 {
+            sqlx::raw_sql(crate::teams::SNAPSHOT_SCHEMA)
                 .execute(&mut *tx)
                 .await?;
         }

@@ -416,6 +416,58 @@ async fn exhausted_assignment_does_not_starve_peers_and_can_use_bounded_admin_re
 }
 
 #[tokio::test]
+async fn inbox_work_snapshot_is_stable_across_administrative_changes() {
+    let (_temp, r, _observers) = setup().await;
+    let run = teams::start(
+        &r,
+        "team",
+        "Keep the claimed work snapshot stable",
+        8,
+        16,
+        120,
+        20,
+    )
+    .await
+    .unwrap();
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
+    let mut args = assignment_args(&run);
+    args.turn_budget = 2;
+    args.message_budget = 4;
+    let assignment = work_act(&r, &lead, Action::AssignmentCreate(args))
+        .await
+        .unwrap();
+    let assignment_id = assignment["assignment_id"].as_str().unwrap().to_owned();
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+
+    let worker = teams::next(&r).await.unwrap().unwrap();
+    let first = read_work(&r, &worker).await;
+    assert_eq!(first["work"]["assignments"][0]["remaining_turns"], 1);
+    agentisan::assignments::extend_assignment(&r, &assignment_id, 1, 0, 0)
+        .await
+        .unwrap();
+    let repeated = read_work(&r, &worker).await;
+    assert_eq!(
+        repeated, first,
+        "a lost inbox_read response must be reproducible after an admin write"
+    );
+    assert_eq!(
+        agentisan::assignments::inspect_assignment(&r, &assignment_id)
+            .await
+            .unwrap()["turn_budget"],
+        3,
+        "the administrative change remains durable for the next turn"
+    );
+    commit(&r, &worker).await;
+    teams::finish(&r, &worker, Ok(native_success()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn admin_extension_counts_assignments_staged_by_an_active_lead_turn() {
     let (_temp, r, observers) = setup().await;
     let run = teams::start(
@@ -1576,6 +1628,95 @@ async fn inspected_no_effect_reconciliation_restores_original_work() {
         1
     );
     registry.close().await;
+}
+
+#[tokio::test]
+async fn committed_turn_reconciliation_preserves_published_work() {
+    let (_temp, registry, observers) = setup().await;
+    let run = teams::start(
+        &registry,
+        "team",
+        "Preserve committed work across restart",
+        6,
+        12,
+        120,
+        20,
+    )
+    .await
+    .unwrap();
+    let lead = teams::next(&registry).await.unwrap().unwrap();
+    read_work(&registry, &lead).await;
+    let assignment = work_act(
+        &registry,
+        &lead,
+        Action::AssignmentCreate(assignment_args(&run)),
+    )
+    .await
+    .unwrap();
+    commit(&registry, &lead).await;
+    let before = teams::inspect_run(&registry, &observers[0], &run)
+        .await
+        .unwrap();
+    assert_eq!(before["pending_message_count"], 1);
+    assert_eq!(before["work"]["assignments"].as_array().unwrap().len(), 1);
+
+    teams::recover_interrupted(&registry).await.unwrap();
+    let reconciled = teams::reconcile_no_effect(&registry, &lead.turn_id)
+        .await
+        .unwrap();
+    assert_eq!(reconciled["committed_effects_preserved"], true);
+    assert_eq!(reconciled["run_state"], "stalled");
+    let after = teams::inspect_run(&registry, &observers[0], &run)
+        .await
+        .unwrap();
+    assert_eq!(after["pending_message_count"], 1);
+    assert_eq!(
+        after["work"]["assignments"][0]["id"],
+        assignment["assignment_id"]
+    );
+    assert_eq!(after["turns"][0]["state"], "reconciled_no_effect");
+
+    teams::resume(&registry, &run).await.unwrap();
+    let worker = teams::next(&registry).await.unwrap().unwrap();
+    assert_eq!(worker.agent.id.as_str(), "a");
+    let inbox = read_work(&registry, &worker).await;
+    let body: Value = serde_json::from_str(inbox["messages"][0]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["assignment_id"], assignment["assignment_id"]);
+    registry.close().await;
+}
+
+#[tokio::test]
+async fn version_six_database_migrates_to_stable_input_snapshots() {
+    let (temp, registry, _observers) = setup().await;
+    registry.close().await;
+    let path = temp.path().join("state/registry.sqlite3");
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::raw_sql("ALTER TABLE turn_leases DROP COLUMN input_snapshot; PRAGMA user_version=6;")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let migrated = Registry::open(&path).await.unwrap();
+    let check = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&check)
+        .await
+        .unwrap();
+    let snapshot_columns: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('turn_leases') WHERE name='input_snapshot'",
+    )
+    .fetch_one(&check)
+    .await
+    .unwrap();
+    assert_eq!(version, 7);
+    assert_eq!(snapshot_columns, 1);
+    check.close().await;
+    migrated.close().await;
 }
 
 #[tokio::test]
