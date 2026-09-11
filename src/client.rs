@@ -59,8 +59,43 @@ impl Client {
         self.request(url, &args).await
     }
 
+    pub async fn start_interactive(&self, args: crate::interactive::StartArgs) -> Result<Value> {
+        let mut url = self.endpoint.clone();
+        url.set_path("/v1/interactive/start");
+        self.request(url, &args).await
+    }
+
+    pub async fn interactive_status(&self, args: crate::interactive::StatusArgs) -> Result<Value> {
+        let mut url = self.endpoint.clone();
+        url.set_path("/v1/interactive/status");
+        self.request_with_timeout(url, &args, Duration::from_secs(65))
+            .await
+    }
+
+    pub async fn interactive_update(&self, args: crate::interactive::UpdateArgs) -> Result<Value> {
+        let mut url = self.endpoint.clone();
+        url.set_path("/v1/interactive/update");
+        self.request(url, &args).await
+    }
+
+    pub async fn interactive_cancel(&self, args: crate::interactive::CancelArgs) -> Result<Value> {
+        let mut url = self.endpoint.clone();
+        url.set_path("/v1/interactive/cancel");
+        self.request(url, &args).await
+    }
+
     async fn request(&self, url: reqwest::Url, body: &impl serde::Serialize) -> Result<Value> {
-        let mut request = self.http.post(url).json(body);
+        self.request_with_timeout(url, body, Duration::from_secs(10))
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        url: reqwest::Url,
+        body: &impl serde::Serialize,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let mut request = self.http.post(url).json(body).timeout(timeout);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }

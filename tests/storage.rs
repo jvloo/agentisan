@@ -40,7 +40,7 @@ async fn newer_database_version_is_rejected_without_changing_schema() {
 }
 
 #[tokio::test]
-async fn schema_seven_migrates_controller_requests_atomically() {
+async fn schema_seven_migrates_through_interactive_controls_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.sqlite");
     Registry::open(&path).await.unwrap().close().await;
@@ -49,7 +49,7 @@ async fn schema_seven_migrates_controller_requests_atomically() {
         .connect_with(SqliteConnectOptions::new().filename(&path))
         .await
         .unwrap();
-    sqlx::raw_sql("DROP TABLE run_requests; PRAGMA user_version=7;")
+    sqlx::raw_sql("DROP TABLE controller_mutations; DROP TABLE controller_start_requests; DROP TABLE controller_leases; DROP TABLE control_capabilities; DROP TABLE run_workers; DROP INDEX one_active_run; ALTER TABLE messages DROP COLUMN controller_ack_at; ALTER TABLE runs DROP COLUMN version; ALTER TABLE runs DROP COLUMN mode; CREATE UNIQUE INDEX one_active_run ON runs(team_id) WHERE state IN ('queued','running','completing'); DROP TABLE run_requests; PRAGMA user_version=7;")
         .execute(&pool)
         .await
         .unwrap();
@@ -71,7 +71,22 @@ async fn schema_seven_migrates_controller_requests_atomically() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!((version, table), (8, 1));
+    let interactive_tables: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('run_workers','control_capabilities','controller_leases','controller_start_requests','controller_mutations')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let run_columns: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('runs') WHERE name IN ('mode','version')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (version, table, interactive_tables, run_columns),
+        (9, 1, 5, 2)
+    );
     pool.close().await;
 }
 

@@ -169,6 +169,8 @@ fn public_action_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
         (StatusCode::CONFLICT, "budget_exhausted")
     } else if detail.contains("idempotency key reused") {
         (StatusCode::CONFLICT, "idempotency_conflict")
+    } else if detail.contains("team already has an active run") {
+        (StatusCode::CONFLICT, "run_already_active")
     } else if detail.contains("reply must address the original sender") {
         (StatusCode::BAD_REQUEST, "invalid_reply")
     } else if detail.contains("database") || detail.contains("SQL") {
@@ -253,6 +255,130 @@ async fn controller_run_start(
         .map_err(public_start_error)
 }
 
+fn public_interactive_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if error
+        .downcast_ref::<RegistryError>()
+        .is_some_and(|value| matches!(value, RegistryError::Unauthorized))
+    {
+        return public_error(RegistryError::Unauthorized);
+    }
+    let detail = error.to_string();
+    let (status, code) = if detail.contains("run not found") {
+        (StatusCode::NOT_FOUND, "not_found")
+    } else if detail.contains("controller credential must belong")
+        || detail.contains("controller credential does not own")
+    {
+        (StatusCode::FORBIDDEN, "controller_forbidden")
+    } else if detail.contains("invalid control handle") {
+        (StatusCode::FORBIDDEN, "invalid_control_handle")
+    } else if detail.contains("another connector instance") {
+        (StatusCode::CONFLICT, "connector_fenced")
+    } else if detail.contains("stale coordination epoch") {
+        (StatusCode::CONFLICT, "stale_epoch")
+    } else if detail.contains("stale run version") {
+        (StatusCode::CONFLICT, "stale_version")
+    } else if detail.contains("idempotency key reused") {
+        (StatusCode::CONFLICT, "idempotency_conflict")
+    } else if detail.contains("team already has an active run") {
+        (StatusCode::CONFLICT, "run_already_active")
+    } else if detail.contains("live authorization") {
+        (StatusCode::BAD_REQUEST, "live_authorization_required")
+    } else if detail.contains("not settled") {
+        (StatusCode::CONFLICT, "work_pending")
+    } else if detail.contains("already settled") {
+        (StatusCode::CONFLICT, "run_already_settled")
+    } else if detail.contains("database") || detail.contains("SQL") {
+        (StatusCode::SERVICE_UNAVAILABLE, "runtime_unavailable")
+    } else {
+        (StatusCode::BAD_REQUEST, "request_rejected")
+    };
+    (status, Json(json!({"error":code})))
+}
+
+async fn interactive_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<crate::interactive::StartArgs>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if headers.contains_key("origin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"browser_origin_not_allowed"})),
+        ));
+    }
+    if !state.scheduler.is_running() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"scheduler_unavailable"})),
+        ));
+    }
+    let token = bearer_token(&headers)?.ok_or_else(|| public_error(RegistryError::Unauthorized))?;
+    crate::interactive::start(&state.registry, token, args)
+        .await
+        .map(Json)
+        .map_err(public_interactive_error)
+}
+
+async fn interactive_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<crate::interactive::StatusArgs>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if headers.contains_key("origin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"browser_origin_not_allowed"})),
+        ));
+    }
+    let token = bearer_token(&headers)?.ok_or_else(|| public_error(RegistryError::Unauthorized))?;
+    crate::interactive::status(&state.registry, token, args)
+        .await
+        .map(Json)
+        .map_err(public_interactive_error)
+}
+
+async fn interactive_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<crate::interactive::UpdateArgs>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if headers.contains_key("origin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"browser_origin_not_allowed"})),
+        ));
+    }
+    if state.scheduler.is_failed() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"scheduler_unavailable"})),
+        ));
+    }
+    let token = bearer_token(&headers)?.ok_or_else(|| public_error(RegistryError::Unauthorized))?;
+    crate::interactive::update(&state.registry, token, args)
+        .await
+        .map(Json)
+        .map_err(public_interactive_error)
+}
+
+async fn interactive_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<crate::interactive::CancelArgs>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if headers.contains_key("origin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"browser_origin_not_allowed"})),
+        ));
+    }
+    let token = bearer_token(&headers)?.ok_or_else(|| public_error(RegistryError::Unauthorized))?;
+    crate::interactive::cancel(&state.registry, token, args)
+        .await
+        .map(Json)
+        .map_err(public_interactive_error)
+}
+
 pub fn router(registry: Registry) -> Router {
     router_with_health(registry, SchedulerHealth::inspection_only())
 }
@@ -272,6 +398,10 @@ fn router_with_health(registry: Registry, scheduler: SchedulerHealth) -> Router 
         .route("/v1/inspect", post(inspect))
         .route("/v1/team-action", post(team_action))
         .route("/v1/controller/run-start", post(controller_run_start))
+        .route("/v1/interactive/start", post(interactive_start))
+        .route("/v1/interactive/status", post(interactive_status))
+        .route("/v1/interactive/update", post(interactive_update))
+        .route("/v1/interactive/cancel", post(interactive_cancel))
         // A 16 KiB semantic result may require 6x that space when JSON-escaped.
         .layer(axum::extract::DefaultBodyLimit::max(131_072))
         .with_state(AppState {
@@ -423,6 +553,91 @@ mod tests {
         assert_eq!(result["team_id"], "t");
         assert_eq!(result["state"], "queued");
         assert_eq!(result["chat_identity"], "not_asserted");
+        registry.close().await;
+    }
+
+    #[tokio::test]
+    async fn running_scheduler_accepts_interactive_start_without_a_native_lead_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("state");
+        let registry = Registry::open(&fixture::database_path(&data).unwrap())
+            .await
+            .unwrap();
+        crate::teams::create(
+            &registry,
+            &data,
+            &TeamConfig {
+                group: Group {
+                    id: "interactive_group".into(),
+                    name: "Interactive".into(),
+                },
+                team: Team {
+                    id: "interactive_team".into(),
+                    group_id: "interactive_group".into(),
+                    name: "Interactive".into(),
+                },
+                agents: vec![
+                    MemberConfig {
+                        id: "lead".into(),
+                        name: "Lead".into(),
+                        role: AgentRole::Lead,
+                        provider: Provider::Codex,
+                        executable: std::env::current_exe().unwrap(),
+                        model: "test".into(),
+                        effort: "low".into(),
+                        instructions: String::new(),
+                    },
+                    MemberConfig {
+                        id: "worker".into(),
+                        name: "Worker".into(),
+                        role: AgentRole::Worker,
+                        provider: Provider::Claude,
+                        executable: std::env::current_exe().unwrap(),
+                        model: "test".into(),
+                        effort: "low".into(),
+                        instructions: String::new(),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        let token =
+            fixture::read_credential(&data.join("managed/interactive_team/lead.token")).unwrap();
+        let scheduler = SchedulerHealth::inspection_only();
+        scheduler.running();
+        let state = AppState {
+            registry: registry.clone(),
+            scheduler,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let result = interactive_start(
+            State(state),
+            headers,
+            Json(crate::interactive::StartArgs {
+                objective: "Use the worker directly".into(),
+                live: true,
+                connector_instance: "connector_test".into(),
+                workers: vec!["worker".into()],
+                initial_work: vec![crate::interactive::InitialWorkItem {
+                    assignee: "worker".into(),
+                    objective: "Review".into(),
+                    done_criteria: vec!["Report evidence".into()],
+                }],
+                idempotency_key: "interactive_start_1".into(),
+                max_turns: Some(2),
+                max_messages: Some(4),
+                timeout_seconds: Some(60),
+                turn_timeout_seconds: Some(10),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(result["mode"], "interactive");
+        let next = crate::teams::next(&registry).await.unwrap().unwrap();
+        assert_eq!(next.agent.id.as_str(), "worker");
         registry.close().await;
     }
 }

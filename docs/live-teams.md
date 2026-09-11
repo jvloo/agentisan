@@ -111,6 +111,13 @@ They cannot register teams, expand limits, or confer human approval. Read access
 group grants for observer credentials; lease credentials can inspect only their own active identity.
 Message recipients must belong to the same team.
 
+Interactive v3 Phase 1 adds `mcp --profile operator` for the configured lead credential. Its
+`team_start` call names exact configured workers and gives each bounded initial work; the scheduler
+does not launch the configured lead. `team_status` returns committed peer messages and controller
+reports without renewing control. `team_update` accepts reports, sends follow-ups, or finishes a
+settled run, while `team_cancel` records confirmed versus unconfirmed stopping. The returned per-run
+control handle is required for mutations and must remain private to the controlling chat context.
+
 Native session/thread IDs appear as soon as the native CLI reports them, and every resumed
 turn must return the same ID. The native CLI stores remain the normal user stores. Native
 history can be opened in the provider's own client after Agentisan releases the session;
@@ -226,13 +233,13 @@ no remaining capacity, the work remains stalled for explicit reconciliation.
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
 
-Database schema version 8 records per-agent ownership epochs, short-lived turn leases, complete
+Database schema version 9 records per-agent ownership epochs, short-lived turn leases, complete
 input snapshots, claimed turn inputs, staged messages and work operations, assignments, decisions,
-durable run proposals, and idempotent controller start receipts.
+durable run proposals, idempotent controller start receipts, and interactive controller capabilities.
 Initialization readiness is recorded in
 the same transaction as a successful fixture import or team creation. Failed first-time
 initialization may leave a schema file, but the service will not treat it as ready. Existing
-databases with records are migrated through schema version 8; old delivery receipts remain
+databases with records are migrated through schema version 9; old delivery receipts remain
 readable. New turns use lease-aware delivery and never restore acknowledge-on-read semantics. An
 old empty database without readiness evidence needs an explicit valid import or team creation.
 No failed import deletes an existing database.
@@ -250,7 +257,7 @@ The latest committed validation used the default low-effort Sonnet/Luna profile.
 directions completed five native turns, two assignments, eleven persistent messages, all six
 checked communication routes, and three distinct native sessions, with no pending messages.
 See the [sanitized results](../validation/live-teams.md). Ordinary validation currently comprises
-75 tests; CI runs them on Linux, macOS, and Windows without model calls.
+81 tests; CI runs them on Linux, macOS, and Windows without model calls.
 
 ```sh
 AGENTISAN_LIVE_TESTS=1 \

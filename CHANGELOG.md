@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added interactive v3 Phase 1 with schema version 9 and an `operator` MCP profile. A host chat can
+  dispatch initial work directly to configured workers, observe committed peer messages, accept
+  worker reports, finish the run, or request cancellation without launching the configured model lead.
+- Added per-run control handles, connector leases, coordination epochs, optimistic versions, and
+  idempotent controller mutation receipts. Read-only status calls never renew ownership.
+- Live-tested one controller with two low-effort Claude Sonnet workers: three worker turns, both peer
+  directions, two reports, two native sessions, and zero configured-lead turns.
 - Added a controller MCP profile for Codex Desktop and other MCP planning chats. A managed lead
   credential can start and inspect its one service-owned team without claiming the host chat as the
   native lead session.
@@ -37,7 +44,7 @@
 - Preserved already-published effects when reconciling a committed turn interrupted before its
   native completion receipt.
 - Refreshed product claims and live-validation evidence for the final core-v2 implementation:
-  75 ordinary tests and both Sonnet/Luna low-effort provider topologies.
+  81 ordinary tests, both autonomous Sonnet/Luna topologies, and the interactive Claude-worker topology.
 - Clarified the provider-agnostic coordination model separately from the currently shipped Claude
   Code and Codex CLI adapters.
 - Clarified migration compatibility and current validation limits, including the terminal-only

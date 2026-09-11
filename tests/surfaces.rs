@@ -306,6 +306,61 @@ async fn agent_mcp_reads_stable_input_and_commits_it_once() {
         "scheduler_unavailable"
     );
     controller.child.kill().await.unwrap();
+
+    let mut operator = Mcp::start_at(
+        &endpoint,
+        Some(&temp.path().join("managed/managed/lead.token")),
+        "operator",
+    )
+    .await;
+    let catalog = operator.request("tools/list", json!({})).await;
+    let tools = catalog["result"]["tools"].as_array().unwrap();
+    let mut names: Vec<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["team_cancel", "team_start", "team_status", "team_update"]
+    );
+    let start_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "team_start")
+        .unwrap();
+    assert_eq!(start_tool["inputSchema"]["additionalProperties"], false);
+    assert!(
+        start_tool["inputSchema"]["properties"]
+            .get("connector_instance")
+            .is_none()
+    );
+    let start = operator
+        .call(
+            "team_start",
+            json!({
+                "objective":"Interactive objective",
+                "live":true,
+                "workers":["worker"],
+                "initial_work":[{
+                    "assignee":"worker",
+                    "objective":"Review",
+                    "done_criteria":["Report evidence"]
+                }],
+                "idempotency_key":"operator_1",
+                "max_turns":4,
+                "max_messages":8,
+                "timeout_seconds":60,
+                "turn_timeout_seconds":10
+            }),
+        )
+        .await;
+    assert_eq!(start["result"]["isError"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(start["result"]["content"][0]["text"].as_str().unwrap())
+            .unwrap()["error"]["code"],
+        "scheduler_unavailable"
+    );
+    operator.child.kill().await.unwrap();
     service.abort();
     registry.close().await;
 }
