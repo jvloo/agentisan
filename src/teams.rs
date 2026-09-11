@@ -273,10 +273,44 @@ pub async fn inspect_run(
 ) -> Result<Value, RegistryError> {
     let p = caller(registry, token).await?;
     let row=sqlx::query("SELECT r.* FROM runs r JOIN teams t ON t.id=r.team_id JOIN grants g ON g.group_id=t.group_id WHERE r.id=? AND g.principal_id=?").bind(id).bind(p.id.as_str()).fetch_optional(&registry.pool).await?.ok_or(RegistryError::NotFound)?;
-    let turns=sqlx::query("SELECT id,agent_id,state,native_id,output,usage,error,artifacts FROM turns WHERE run_id=? ORDER BY started_at,id").bind(id).fetch_all(&registry.pool).await?;
-    let data:Vec<Value>=turns.iter().map(|r|json!({"id":r.get::<String,_>("id"),"agent_id":r.get::<String,_>("agent_id"),"state":r.get::<String,_>("state"),"native_id":r.get::<Option<String>,_>("native_id"),"output":r.get::<Option<String>,_>("output"),"usage":r.get::<Option<String>,_>("usage").and_then(|s|serde_json::from_str::<Value>(&s).ok()),"error":r.get::<Option<String>,_>("error")})).collect();
+    let turns=sqlx::query("SELECT id,agent_id,state,started_at,ended_at,native_id,output,usage,error,artifacts FROM turns WHERE run_id=? ORDER BY started_at,id").bind(id).fetch_all(&registry.pool).await?;
+    let data:Vec<Value>=turns.iter().map(|r|json!({"id":r.get::<String,_>("id"),"agent_id":r.get::<String,_>("agent_id"),"state":r.get::<String,_>("state"),"started_at":r.get::<i64,_>("started_at"),"ended_at":r.get::<Option<i64>,_>("ended_at"),"native_id":r.get::<Option<String>,_>("native_id"),"output":r.get::<Option<String>,_>("output"),"usage":r.get::<Option<String>,_>("usage").and_then(|s|serde_json::from_str::<Value>(&s).ok()),"error":r.get::<Option<String>,_>("error")})).collect();
+    let active = data.iter().find(|turn| turn["state"] == "running");
+    let run_state = row.get::<String, _>("state");
+    let activity_state = if active.is_some() {
+        "running"
+    } else if matches!(run_state.as_str(), "queued" | "running" | "completing") {
+        "waiting"
+    } else {
+        "idle"
+    };
+    let activity = json!({
+        "source":"agentisan_runtime",
+        "authoritative":true,
+        "state":activity_state,
+        "active_agent_id":active.and_then(|turn|turn["agent_id"].as_str()),
+        "active_turn_id":active.and_then(|turn|turn["id"].as_str()),
+        "since":active.and_then(|turn|turn["started_at"].as_i64()),
+        "native_client_status":"advisory_while_agentisan_owns_the_run"
+    });
+    let message_count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE run_id=?")
+        .bind(id)
+        .fetch_one(&registry.pool)
+        .await?;
+    let pending_message_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM messages WHERE run_id=? AND delivered_turn IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&registry.pool)
+    .await?;
+    let verification = crate::verification::inspect(registry, id).await?;
+    let acceptance = match verification["state"].as_str() {
+        Some("accepted") => "accepted",
+        Some("rejected") => "rejected",
+        _ => "not_independently_verified",
+    };
     Ok(
-        json!({"id":id,"team_id":row.get::<String,_>("team_id"),"state":row.get::<String,_>("state"),"result":row.get::<Option<String>,_>("result"),"error":row.get::<Option<String>,_>("error"),"turn_count":row.get::<i64,_>("turns"),"max_turns":row.get::<i64,_>("max_turns"),"deadline":row.get::<i64,_>("deadline"),"turns":data,"acceptance":"not_independently_verified"}),
+        json!({"id":id,"team_id":row.get::<String,_>("team_id"),"state":run_state,"result":row.get::<Option<String>,_>("result"),"error":row.get::<Option<String>,_>("error"),"turn_count":row.get::<i64,_>("turns"),"max_turns":row.get::<i64,_>("max_turns"),"deadline":row.get::<i64,_>("deadline"),"message_count":message_count,"pending_message_count":pending_message_count,"activity":activity,"turns":data,"acceptance":acceptance,"verification":verification}),
     )
 }
 

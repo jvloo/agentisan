@@ -24,7 +24,9 @@ Acceptance:
 
 ## Milestone 2 — Durable single worker and trusted human decisions
 
-**Status: partial.** Native CLI turns, completion receipts, process deadlines/watchdog, interrupted-state recording, and narrow inspected resume are implemented. General effect reconciliation and trusted human decisions remain open.
+**Status: partial.** Native CLI turns, completion receipts, process deadlines/watchdog,
+interrupted-state recording, narrow inspected resume, and deterministic exact-result verification
+receipts are implemented. General effect reconciliation and trusted human decisions remain open.
 
 Goal: one bounded worker job can complete, recover, or report uncertain effects after a crash, and a human decision can gate it.
 
@@ -48,7 +50,10 @@ Acceptance:
 
 ## Milestone 4 — 1-to-N peer collaboration and existing-client links
 
-**Status: core communication implemented.** Reusable service-owned teams perform real lead/worker and worker/worker MCP exchanges in both provider directions. CLI/MCP inspection and exact native IDs work. Client-owned lead binding, native deep-link opening, and concurrent native turns remain open.
+**Status: core communication implemented.** Reusable service-owned teams perform real lead/worker
+and worker/worker MCP exchanges in both provider directions. CLI/MCP inspection, bounded live
+watching, authoritative runtime activity, exact native IDs, and separate result verification work.
+Client-owned lead binding, native deep-link opening, and concurrent native turns remain open.
 
 Goal: a main agent driven from an existing CLI/Desktop client can delegate to multiple workers that exchange bounded peer messages, with native links back into supported clients.
 

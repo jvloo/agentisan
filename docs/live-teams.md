@@ -65,6 +65,8 @@ template:
   messages list --run RUN_ID
 ./target/debug/agentisan --credential-file .agentisan/managed/claude_team/claude_lead.token \
   agents inspect codex_a
+./target/debug/agentisan --credential-file .agentisan/managed/claude_team/claude_lead.token \
+  runs watch RUN_ID --interval-ms 500 --timeout-seconds 300
 ```
 
 The existing stdio MCP connector exposes the same inspection operations. New tools are
@@ -79,6 +81,9 @@ history can be opened in the provider's own client after Agentisan releases the 
 Codex app readback was checked after completed runs. Live inspection through Agentisan MCP
 does not acquire a native writer. Do not start a competing native resume while a run is
 active. Automatic native deep-link opening and cross-client writer handoff are not shipped.
+Agentisan's `activity` record is the authoritative liveness source while it owns the run. Native
+clients remain useful transcript inspectors, but their running/interrupted label is advisory for
+an externally driven CLI session.
 
 ## Delivery and completion
 
@@ -88,8 +93,18 @@ under the same key fail. Replies must address the original sender in the same ru
 `messages_receive` acknowledges delivery, which is distinct from finishing the assignment.
 The lead can propose completion only after pending messages are received, other active turns
 settle, and each worker has reported to it. Native turn completion is verified separately.
-The final run result still says `not_independently_verified`: it is an agent proposal, not
-proof of correctness or a human approval.
+The final run result still says `not_independently_verified`: it is an agent proposal, not proof
+of correctness or a human approval. A local administrator may run one exact-result verifier:
+
+```sh
+./target/debug/agentisan --data-dir "$PWD/.agentisan" runs verify RUN_ID \
+  --verifier /absolute/path/to/verifier --timeout-seconds 30
+```
+
+The verifier receives the proposed result bytes on stdin and returns one JSON object with
+`accepted`, `summary`, and optional `evidence`. Agentisan records accepted/rejected/error separately
+from native execution completion, including verifier and result hashes. Agents cannot choose or
+invoke the verifier. An error may be inspected and retried; acceptance or rejection is terminal.
 
 Agents end a turn while waiting for peers. New pending messages cause the scheduler to resume
 the exact native session. There are no automatic acknowledgement chains or hidden model
