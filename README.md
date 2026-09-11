@@ -272,6 +272,8 @@ the service through a proxy or tunnel. See the [Milestone 1 contract](docs/miles
 
 ## Design and roadmap
 
+- [Interactive agent teams v3](docs/interactive-teams-v3.md): proposed main-chat coordination,
+  generic MCP tools, installation experience, durability rules, and implementation plan.
 - [Architecture](docs/architecture.md): the intended team runtime and its boundaries.
 - [Rust decision](docs/decisions/0001-rust-core.md): stack choice and deferred decisions.
 - [Durable protocol decision](docs/decisions/0002-durable-agent-protocol.md): leases, atomic

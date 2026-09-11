@@ -1,5 +1,10 @@
 # Roadmap
 
+The next architecture is specified in [Interactive agent teams v3](docs/interactive-teams-v3.md).
+It replaces the transitional planning-chat controller flow with interactive coordination owned by
+the developer's existing main chat. The v3 document is a proposal; the milestones below describe the
+currently shipped core-v2 path and its earlier roadmap.
+
 Milestones 0 and 1 are implemented. Core-v2 also ships substantial parts of milestones 2–5,
 including service-owned cross-provider coordination, durable turn commits, assignments, scoped
 decisions, inspected recovery, and deterministic result verification. See

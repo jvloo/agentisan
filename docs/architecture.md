@@ -1,6 +1,11 @@
 # Architecture
 
-This document describes Agentisan's broader runtime design. The Rust implementation now includes
+This document describes Agentisan's shipped core-v2 runtime design. The proposed
+[interactive agent teams v3](interactive-teams-v3.md) makes the developer's existing chat the
+default coordination owner and retains the service-owned model lead as an explicit autonomous mode.
+That proposal is not shipped yet.
+
+The Rust implementation now includes
 the fixture registry, managed native CLI teams with persistent MCP messages, bounded invocations,
 native session continuation, authoritative live inspection, and administrator-selected deterministic
 verification of exact proposed results. See the [live-team contract](live-teams.md) for what is
