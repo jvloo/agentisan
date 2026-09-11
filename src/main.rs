@@ -43,6 +43,36 @@ enum Command {
         #[arg(long, value_enum, default_value = "auto")]
         target: agentisan::dashboard::OpenTarget,
     },
+    /// Start a managed team with a bounded objective.
+    Run {
+        /// Managed team ID.
+        team: String,
+        /// Objective text. Use --prompt-file for longer prompts.
+        #[arg(
+            long,
+            conflicts_with = "prompt_file",
+            required_unless_present = "prompt_file"
+        )]
+        objective: Option<String>,
+        /// Read the objective from a UTF-8 file.
+        #[arg(
+            long,
+            conflicts_with = "objective",
+            required_unless_present = "objective"
+        )]
+        prompt_file: Option<PathBuf>,
+        /// Authorize actual calls to the configured providers.
+        #[arg(long)]
+        live: bool,
+        #[arg(long, default_value_t = teams::DEFAULT_MAX_TURNS)]
+        max_turns: u32,
+        #[arg(long, default_value_t = teams::DEFAULT_MAX_MESSAGES)]
+        max_messages: u32,
+        #[arg(long, default_value_t = teams::DEFAULT_TIMEOUT_SECONDS)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = teams::DEFAULT_TURN_TIMEOUT_SECONDS)]
+        turn_timeout_seconds: u64,
+    },
     #[command(hide = true)]
     WorkerHost {
         #[arg(long)]
@@ -263,6 +293,39 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         } => {
             return agentisan::dashboard::open_native(&cli.data_dir, &run_id, &agent_id, target)
                 .await;
+        }
+        Command::Run {
+            team,
+            objective,
+            prompt_file,
+            live,
+            max_turns,
+            max_messages,
+            timeout_seconds,
+            turn_timeout_seconds,
+        } => {
+            if !live {
+                bail!("run requires --live to authorize actual provider calls");
+            }
+            let objective = match (objective, prompt_file) {
+                (Some(value), None) => value,
+                (None, Some(path)) => std::fs::read_to_string(path)?,
+                _ => bail!("provide exactly one of --objective or --prompt-file"),
+            };
+            let registry = Registry::open(&fixture::database_path(&cli.data_dir)?).await?;
+            let id = teams::start(
+                &registry,
+                &team,
+                &objective,
+                max_turns,
+                max_messages,
+                timeout_seconds,
+                turn_timeout_seconds,
+            )
+            .await?;
+            registry.close().await;
+            println!("{}", serde_json::json!({"run_id":id,"state":"queued"}));
+            return Ok(());
         }
         Command::WorkerHost {
             exit_file,

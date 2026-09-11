@@ -16,6 +16,8 @@ const MAX_MCP_RESULT_BYTES: usize = 131_072;
 pub enum Profile {
     /// A narrow, credential-bound surface used by a managed agent turn.
     Agent,
+    /// A managed lead credential that can start and inspect its team.
+    Controller,
     /// A bounded, read-only inspection surface for trusted clients.
     Observer,
 }
@@ -143,6 +145,26 @@ fn action_rejected(error: &anyhow::Error) -> CallToolResult {
         "idempotency_conflict"
     } else if detail.contains("reply must address the original sender") {
         "invalid_reply"
+    } else {
+        "request_rejected"
+    };
+    rejected_code(code)
+}
+
+fn start_rejected(error: &anyhow::Error) -> CallToolResult {
+    let detail = error.to_string();
+    let code = if detail.contains("scheduler_unavailable") {
+        "scheduler_unavailable"
+    } else if detail.contains("controller_forbidden") {
+        "controller_forbidden"
+    } else if detail.contains("idempotency_conflict") {
+        "idempotency_conflict"
+    } else if detail.contains("run_already_active") {
+        "run_already_active"
+    } else if detail.contains("live_authorization_required") {
+        "live_authorization_required"
+    } else if detail.contains("invalid_request") {
+        "invalid_request"
     } else {
         "request_rejected"
     };
@@ -320,6 +342,175 @@ impl ServerHandler for ObserverServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions("Agentisan observer profile. All tools are credential-scoped, bounded and read-only. Native identifiers do not grant authority. These tools never resume agents, send messages, approve decisions, or execute commands.")
+    }
+}
+
+#[derive(Clone)]
+pub struct ControllerServer {
+    client: Client,
+    agent_id: String,
+    team_id: String,
+}
+
+impl ControllerServer {
+    pub fn new(client: Client, agent_id: String, team_id: String) -> Self {
+        Self {
+            client,
+            agent_id,
+            team_id,
+        }
+    }
+
+    async fn scoped_run(&self, run_id: &str) -> Result<serde_json::Value, ()> {
+        let value = self
+            .client
+            .inspect(Query::RunsInspect {
+                run_id: run_id.to_string(),
+            })
+            .await
+            .map_err(|_| ())?;
+        if value["team_id"] != self.team_id {
+            return Err(());
+        }
+        Ok(value)
+    }
+}
+
+#[tool_router]
+impl ControllerServer {
+    #[tool(
+        description = "Get this controller's credential-bound managed team. The MCP host chat is a controller and is not asserted as the team lead session.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn controller_context_get(
+        &self,
+        Parameters(_args): Parameters<EmptyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let identity = match self.client.inspect(Query::Whoami {}).await {
+            Ok(value) => value,
+            Err(_) => return Ok(rejected()),
+        };
+        Ok(success(serde_json::json!({
+            "protocol": "agentisan-controller-v1",
+            "identity": identity,
+            "agent_id": self.agent_id,
+            "team_id": self.team_id,
+            "controller_identity": "managed_team_lead_credential",
+            "chat_identity": "not_asserted",
+            "capabilities": ["team_run_start","team_members_list","runs_inspect","messages_list"]
+        })))
+    }
+
+    #[tool(
+        description = "List the members of this controller's managed team. Never starts or resumes execution.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn team_members_list(
+        &self,
+        Parameters(_args): Parameters<EmptyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(
+            match self
+                .client
+                .inspect(Query::AgentsList {
+                    team_id: TeamId(self.team_id.clone()),
+                })
+                .await
+            {
+                Ok(value) => success(value),
+                Err(_) => rejected(),
+            },
+        )
+    }
+
+    #[tool(
+        description = "Start this controller's managed team with bounded limits. Requires live=true because it launches actual configured provider calls. Use one stable idempotency key for one logical start.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn team_run_start(
+        &self,
+        Parameters(args): Parameters<crate::teams::ControllerStartArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(match self.client.start_run(args).await {
+            Ok(value) => success(value),
+            Err(error) => start_rejected(&error),
+        })
+    }
+
+    #[tool(
+        description = "Inspect authoritative state, limits and completed turn outputs for one run of this managed team.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn runs_inspect(
+        &self,
+        Parameters(args): Parameters<RunArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !valid_identifier(&args.run_id) {
+            return Ok(rejected());
+        }
+        Ok(match self.scoped_run(&args.run_id).await {
+            Ok(value) => success(value),
+            Err(_) => rejected(),
+        })
+    }
+
+    #[tool(
+        description = "Read the ordered messages for one run of this managed team. Does not deliver or acknowledge them.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn messages_list(
+        &self,
+        Parameters(args): Parameters<RunArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !valid_identifier(&args.run_id) || self.scoped_run(&args.run_id).await.is_err() {
+            return Ok(rejected());
+        }
+        Ok(
+            match self
+                .client
+                .inspect(Query::MessagesList {
+                    run_id: args.run_id,
+                })
+                .await
+            {
+                Ok(value) => success(value),
+                Err(_) => rejected(),
+            },
+        )
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for ControllerServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions("Agentisan controller profile for a planning chat. The credential selects one managed team; the chat itself is not asserted as the native team lead. Call team_run_start only after the user asks to launch the team and set live=true only with that authorization. Reuse the same idempotency key for an exact retry. Use the returned run_id with runs_inspect and messages_list. Agentisan owns team execution, peer communication, limits, and receipts.")
     }
 }
 
@@ -579,6 +770,31 @@ pub async fn run(client: Client, profile: Profile) -> anyhow::Result<()> {
                 .waiting()
                 .await?;
         }
+        Profile::Controller => {
+            let identity = client.inspect(Query::Whoami {}).await?;
+            if identity["evidence"] != "managed_credential" {
+                anyhow::bail!("controller MCP profile requires a managed lead credential");
+            }
+            let agent_id = identity["agent_id"].as_str().ok_or_else(|| {
+                anyhow::anyhow!("controller MCP profile requires a managed lead credential")
+            })?;
+            let record = client
+                .inspect(Query::AgentsInspect {
+                    agent_id: AgentId(agent_id.to_string()),
+                })
+                .await?;
+            if record["agent"]["role"] != "lead" {
+                anyhow::bail!("controller MCP profile requires a managed lead credential");
+            }
+            let team_id = record["agent"]["team_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("managed lead has no team"))?;
+            ControllerServer::new(client, agent_id.to_string(), team_id.to_string())
+                .serve(rmcp::transport::stdio())
+                .await?
+                .waiting()
+                .await?;
+        }
         Profile::Observer => {
             ObserverServer::new(client)
                 .serve(rmcp::transport::stdio())
@@ -605,5 +821,13 @@ mod tests {
         assert!(!lead.tool_router.has_route("decision_resolve"));
         assert_eq!(worker.tool_router.list_all().len(), 6);
         assert_eq!(lead.tool_router.list_all().len(), 8);
+    }
+
+    #[test]
+    fn controller_catalog_is_small_and_explicit() {
+        let router = ControllerServer::tool_router();
+        assert_eq!(router.list_all().len(), 5);
+        assert!(router.has_route("team_run_start"));
+        assert!(!router.has_route("message_send"));
     }
 }

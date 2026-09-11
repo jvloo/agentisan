@@ -40,6 +40,42 @@ async fn newer_database_version_is_rejected_without_changing_schema() {
 }
 
 #[tokio::test]
+async fn schema_seven_migrates_controller_requests_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+    Registry::open(&path).await.unwrap().close().await;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
+    sqlx::raw_sql("DROP TABLE run_requests; PRAGMA user_version=7;")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    Registry::open(&path).await.unwrap().close().await;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let table: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='run_requests'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((version, table), (8, 1));
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn local_initializer_preserves_credentials_and_inspection_is_read_only() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("state");

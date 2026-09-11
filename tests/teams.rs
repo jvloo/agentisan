@@ -48,6 +48,116 @@ async fn setup() -> (tempfile::TempDir, Registry, Vec<String>) {
     (temp, registry, tokens)
 }
 
+fn controller_args(key: &str, objective: &str) -> teams::ControllerStartArgs {
+    teams::ControllerStartArgs {
+        objective: objective.into(),
+        live: true,
+        idempotency_key: key.into(),
+        max_turns: None,
+        max_messages: None,
+        timeout_seconds: None,
+        turn_timeout_seconds: None,
+    }
+}
+
+#[tokio::test]
+async fn controller_start_is_lead_scoped_atomic_and_idempotent() {
+    let (temp, registry, tokens) = setup().await;
+    let first = teams::start_as_controller(
+        &registry,
+        &tokens[0],
+        controller_args("desktop_plan_1", "Implement the accepted plan"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["team_id"], "team");
+    assert_eq!(first["duplicate"], false);
+    assert_eq!(first["chat_identity"], "not_asserted");
+
+    let repeated = teams::start_as_controller(
+        &registry,
+        &tokens[0],
+        controller_args("desktop_plan_1", "Implement the accepted plan"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeated["run_id"], first["run_id"]);
+    assert_eq!(repeated["duplicate"], true);
+
+    let changed = teams::start_as_controller(
+        &registry,
+        &tokens[0],
+        controller_args("desktop_plan_1", "A different objective"),
+    )
+    .await
+    .unwrap_err();
+    assert!(changed.to_string().contains("idempotency"));
+
+    let second_key = teams::start_as_controller(
+        &registry,
+        &tokens[0],
+        controller_args("desktop_plan_2", "Another objective"),
+    )
+    .await
+    .unwrap_err();
+    assert!(second_key.to_string().contains("active run"));
+
+    let worker = teams::start_as_controller(
+        &registry,
+        &tokens[1],
+        controller_args("worker_attempt", "Start work"),
+    )
+    .await
+    .unwrap_err();
+    assert!(worker.to_string().contains("managed lead"));
+
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        temp.path().join("state/registry.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let requests: i64 = sqlx::query_scalar("SELECT count(*) FROM run_requests")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let messages: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((runs, requests, messages), (1, 1, 1));
+    pool.close().await;
+    registry.close().await;
+}
+
+#[tokio::test]
+async fn controller_start_requires_explicit_live_authorization() {
+    let (temp, registry, tokens) = setup().await;
+    let mut args = controller_args("not_live", "Do work");
+    args.live = false;
+    let error = teams::start_as_controller(&registry, &tokens[0], args)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("live authorization"));
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        temp.path().join("state/registry.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    pool.close().await;
+    registry.close().await;
+}
+
 #[tokio::test]
 async fn broker_sender_names_are_reserved_from_agent_ids() {
     for reserved in ["human", "system", "agentisan"] {
@@ -1713,7 +1823,7 @@ async fn version_six_database_migrates_to_stable_input_snapshots() {
     .fetch_one(&check)
     .await
     .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     assert_eq!(snapshot_columns, 1);
     check.close().await;
     migrated.close().await;

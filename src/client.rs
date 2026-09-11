@@ -53,6 +53,12 @@ impl Client {
         self.request(url, &action).await
     }
 
+    pub async fn start_run(&self, args: crate::teams::ControllerStartArgs) -> Result<Value> {
+        let mut url = self.endpoint.clone();
+        url.set_path("/v1/controller/run-start");
+        self.request(url, &args).await
+    }
+
     async fn request(&self, url: reqwest::Url, body: &impl serde::Serialize) -> Result<Value> {
         let mut request = self.http.post(url).json(body);
         if let Some(token) = &self.token {

@@ -20,7 +20,7 @@ Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive
 - **Groups** are organizational/policy namespaces. They do not spawn automatic coordinating agents.
 - **Teams** live inside groups; **agents** live inside teams.
 - Exactly **one main agent owns coordination** for a given objective/job at any time. Ownership transfer is explicit and stale owners are rejected — the system must never let two main agents drive the same objective concurrently.
-- The implemented CLI-team path is **service-led**: the service hosts the lead's native CLI turns and resumes members when messages arrive. Coordination continues while the service host is available. A natively bound **client-led** adapter remains planned; in that mode, a disconnected client-owned main agent would need to return for coordination. The two modes must never create competing owners of the same objective.
+- The implemented CLI-team path is **service-led**: the service hosts the lead's native CLI turns and resumes members when messages arrive. A planning chat can start and inspect that team through the controller MCP profile, but the chat does not become the lead or inherit its sender identity. Coordination continues while the service host is available. A natively bound **client-led** adapter remains planned; in that mode, a disconnected client-owned main agent would need to return for coordination. The two modes must never create competing owners of the same objective.
 
 ## What the service owns
 
@@ -50,7 +50,10 @@ The model-facing MCP surface is role-scoped. The **agent** profile exposes
 `agent_context_get`, `inbox_read`, `message_send`, `assignment_update`, `decision_request`, and
 `turn_commit`; leads additionally receive `assignment_create` and `result_propose`. The
 **observer** profile exposes bounded read-only inspection tools and cannot send,
-resume, approve, or execute. Connector and administrator operations remain outside model MCP:
+resume, approve, or execute. The **controller** profile binds a long-lived managed-lead credential
+to one team and exposes context, member and run inspection, plus one idempotent `team_run_start`.
+Starting requires an explicit live flag and a running scheduler. The controller cannot act as a
+member, and the MCP connection does not authenticate the enclosing host conversation. Connector and administrator operations otherwise remain outside model MCP:
 the service-owned native adapters claim delivery and report native state through internal callbacks;
 administrators create teams, reconcile unknown turns as no-effect after inspection, select
 verifiers, and resolve or invalidate exact decision revisions. Public connector APIs, other effect

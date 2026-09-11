@@ -33,6 +33,51 @@ fn config() -> TeamConfig {
 }
 
 #[tokio::test]
+async fn controller_start_requires_a_worker_enabled_service() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let registry = Registry::open(&fixture::database_path(&data).unwrap())
+        .await
+        .unwrap();
+    teams::create(&registry, &data, &config()).await.unwrap();
+    let token = fixture::read_credential(&data.join("managed/t/lead.token")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/v1/controller/run-start",
+        listener.local_addr().unwrap()
+    );
+    let service = tokio::spawn(async move {
+        axum::serve(listener, server::router(registry.clone()))
+            .await
+            .unwrap()
+    });
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(url)
+        .bearer_auth(token)
+        .json(&teams::ControllerStartArgs {
+            objective: "Do work".into(),
+            live: true,
+            idempotency_key: "desktop_1".into(),
+            max_turns: None,
+            max_messages: None,
+            timeout_seconds: None,
+            turn_timeout_seconds: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["error"],
+        "scheduler_unavailable"
+    );
+    service.abort();
+}
+
+#[tokio::test]
 async fn largest_semantic_result_survives_json_escaping_and_http_framing() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("state");

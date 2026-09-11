@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added a controller MCP profile for Codex Desktop and other MCP planning chats. A managed lead
+  credential can start and inspect its one service-owned team without claiming the host chat as the
+  native lead session.
+- Added atomic, idempotent controller run starts in schema version 8, with explicit live-provider
+  authorization and a worker-scheduler health fence.
+- Added `agentisan run TEAM --objective "..." --live` as the concise CLI start path while retaining
+  the file-oriented `teams run` command.
 - Added a default live terminal dashboard with clickable agent filtering, automatic refresh, and
   combined run, assignment, decision, budget, and message-route views.
 - Added safe exact-session opening for released Claude Code and Codex CLI agents; active and
@@ -13,8 +20,8 @@
 - Added core-v2 durable turn protocol: schema version 7, short-lived per-turn lease
   credentials, ownership epochs, complete stable inbox snapshots, staged sends, and atomic
   `turn_commit`.
-- Added role-scoped agent and observer MCP profiles and kept connector/admin operations outside
-  the model-facing surface.
+- Added role-scoped agent, observer, and controller MCP profiles. Administrative operations remain
+  outside the model-facing surface.
 - Persisted lead result proposals independently of native process completion so they remain
   inspectable and independently verifiable after failure or restart.
 - Added scheduler fail-closed health behavior and recovery of abandoned verifier reservations.
@@ -30,7 +37,7 @@
 - Preserved already-published effects when reconciling a committed turn interrupted before its
   native completion receipt.
 - Refreshed product claims and live-validation evidence for the final core-v2 implementation:
-  62 ordinary tests and both Sonnet/Luna low-effort provider topologies.
+  75 ordinary tests and both Sonnet/Luna low-effort provider topologies.
 - Clarified the provider-agnostic coordination model separately from the currently shipped Claude
   Code and Codex CLI adapters.
 - Clarified migration compatibility and current validation limits, including the terminal-only

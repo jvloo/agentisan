@@ -40,6 +40,13 @@ From another terminal, write the objective to `.agentisan/objective.txt`, then s
   --timeout-seconds 900 --turn-timeout-seconds 120
 ```
 
+The shorter equivalent accepts inline text or the same prompt file:
+
+```sh
+./target/debug/agentisan run claude_team \
+  --objective "Ask both specialists for evidence, reconcile their findings, and report" --live
+```
+
 `teams create` registers one lead and up to seven workers. It does not call a model. `teams run`
 requires `--live`, returns a run ID immediately, and queues work for the separate service.
 The service needs `--enable-cli-workers` to execute it. The initial objective is addressed to
@@ -63,6 +70,20 @@ Creating an existing managed team fails rather than silently replacing profiles 
 New objectives on a team get fresh native sessions; old native IDs remain in the turn history.
 Only one active run per team is allowed. Client-led coordination through a natively bound
 external main agent remains a separate future adapter; current managed leads run in the service.
+
+### Start from a planning chat through MCP
+
+An MCP host such as Codex Desktop can connect with the managed lead's long-lived token and
+`mcp --profile controller`. The profile derives the team from that credential and exposes five
+tools: `controller_context_get`, `team_members_list`, `team_run_start`, `runs_inspect`, and
+`messages_list`. Refine a plan in the host chat, then ask it to start the team with the accepted
+objective. The start requires `live: true`, bounded optional limits, and a stable idempotency key.
+The worker-enabled service must already be running.
+
+This is service-led execution initiated by a planning chat. The MCP transport does not provide a
+trustworthy Codex Desktop conversation ID, so the host chat cannot claim the managed lead's agent
+identity or send peer messages on its behalf. The result reports that distinction explicitly. A
+future client-led adapter needs a host-authenticated per-conversation binding and ownership transfer.
 
 ## Inspect from existing clients
 
@@ -205,13 +226,13 @@ no remaining capacity, the work remains stalled for explicit reconciliation.
 Run records, source instructions, raw CLI traces, and account-related metadata stay under
 the private data directory; never commit it.
 
-Database schema version 7 records per-agent ownership epochs, short-lived turn leases, complete
+Database schema version 8 records per-agent ownership epochs, short-lived turn leases, complete
 input snapshots, claimed turn inputs, staged messages and work operations, assignments, decisions,
-and durable run proposals.
+durable run proposals, and idempotent controller start receipts.
 Initialization readiness is recorded in
 the same transaction as a successful fixture import or team creation. Failed first-time
 initialization may leave a schema file, but the service will not treat it as ready. Existing
-databases with records are migrated through schema version 7; old delivery receipts remain
+databases with records are migrated through schema version 8; old delivery receipts remain
 readable. New turns use lease-aware delivery and never restore acknowledge-on-read semantics. An
 old empty database without readiness evidence needs an explicit valid import or team creation.
 No failed import deletes an existing database.
@@ -229,7 +250,7 @@ The latest committed validation used the default low-effort Sonnet/Luna profile.
 directions completed five native turns, two assignments, eleven persistent messages, all six
 checked communication routes, and three distinct native sessions, with no pending messages.
 See the [sanitized results](../validation/live-teams.md). Ordinary validation currently comprises
-68 tests; CI runs them on Linux, macOS, and Windows without model calls.
+75 tests; CI runs them on Linux, macOS, and Windows without model calls.
 
 ```sh
 AGENTISAN_LIVE_TESTS=1 \
