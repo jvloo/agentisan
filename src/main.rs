@@ -12,7 +12,7 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Parser)]
 #[command(
     version,
-    about = "Run and inspect persistent agent teams through CLI and MCP"
+    about = "Craft and inspect durable agent teams through a terminal dashboard, CLI, and MCP"
 )]
 struct Cli {
     #[arg(long, global = true, default_value = ".agentisan")]
@@ -23,11 +23,23 @@ struct Cli {
     #[arg(long, global = true)]
     credential_file: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the live, read-only terminal dashboard (also the default with no subcommand).
+    Dashboard {
+        /// Open with this run selected; defaults to the newest run.
+        run_id: Option<String>,
+    },
+    /// Open one released agent session in an exact native client.
+    Open {
+        run_id: String,
+        agent_id: String,
+        #[arg(long, value_enum, default_value = "auto")]
+        target: agentisan::dashboard::OpenTarget,
+    },
     #[command(hide = true)]
     WorkerHost {
         #[arg(long)]
@@ -214,25 +226,40 @@ enum AgentsCommand {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    let command = cli
+        .command
+        .take()
+        .unwrap_or(Command::Dashboard { run_id: None });
     // The process-group anchor only uses std process/thread APIs. Avoid creating
     // a Tokio worker pool for every supervised CLI invocation.
     if let Command::WorkerHost {
         exit_file,
         timeout_ms,
         command,
-    } = &cli.command
+    } = &command
     {
         return agentisan::worker::host(exit_file, *timeout_ms, command);
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(cli))
+        .block_on(run(cli, command))
 }
 
-async fn run(cli: Cli) -> Result<()> {
-    let query = match cli.command {
+async fn run(cli: Cli, command: Command) -> Result<()> {
+    let query = match command {
+        Command::Dashboard { run_id } => {
+            return agentisan::dashboard::run(&cli.data_dir, run_id.as_deref()).await;
+        }
+        Command::Open {
+            run_id,
+            agent_id,
+            target,
+        } => {
+            return agentisan::dashboard::open_native(&cli.data_dir, &run_id, &agent_id, target)
+                .await;
+        }
         Command::WorkerHost {
             exit_file,
             timeout_ms,

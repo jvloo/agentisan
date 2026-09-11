@@ -2,6 +2,7 @@ pub mod assignments;
 pub mod capture;
 pub mod cli_protocol;
 pub mod client;
+pub mod dashboard;
 pub mod fixture;
 pub mod mcp;
 pub mod model;

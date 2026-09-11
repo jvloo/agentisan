@@ -13,7 +13,7 @@ opening remain proposed. Rust is selected for the core
 
 Agentisan exposes **one local service** through two front ends — a **CLI toolkit** and an **MCP server** — that call the same underlying behavior. The durable protocol and registry are provider-neutral; the current execution adapters use Claude Code and Codex CLI. Native integrations, such as linking into an existing client's session, remain optional adapters with explicit capabilities. Direct provider API workers are an intended path, with their own credentials and billing, independent of any native app.
 
-Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive multi-coordinator swarm. It starts with one active coordination owner per objective, 1-to-N delegation, and bounded peer messaging between workers. Recursive N-to-N delegation and cross-team automation are explicitly deferred.
+Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive multi-coordinator swarm. Its human-facing default is a read-only terminal dashboard backed by the same local state as its CLI and MCP surfaces. It starts with one active coordination owner per objective, 1-to-N delegation, and bounded peer messaging between workers. Recursive N-to-N delegation and cross-team automation are explicitly deferred.
 
 ## Ownership model
 
@@ -88,6 +88,12 @@ human-interaction adapters and general cancellation decisions remain future work
 approval.
 
 ## Inspection
+
+Running `agentisan` opens a live terminal dashboard over the trusted local database through a
+query-only, current-schema connection. It presents runs, agents, assignments, decisions, limits,
+and message routes without creating, migrating, or claiming a native writer.
+Mouse selection and keyboard cycling filter one agent's communication. Exact native CLI opening is
+available only after the run releases ownership; unsupported Desktop targets fail closed.
 
 Credential-scoped CLI and observer MCP queries expose registered agents, authoritative run activity,
 the persistent message timeline, assignment and decision records, native turn IDs, captured output,

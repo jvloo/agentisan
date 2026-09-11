@@ -29,7 +29,7 @@ configuration. The fixture walkthrough below exercises inspection without model 
 | Bounded delegation | Assignments reserve turn and message slices inside immutable run limits. Exhausted assignments do not starve independent work, and inspected extensions cannot enlarge the root budget. |
 | Human decisions | Agents can request a choice against exact scope and artifact hashes. Only the trusted local CLI can resolve or invalidate it; a blocking request pauses its dependent assignment. |
 | Recovery | Restarted in-flight work becomes explicit `unknown` state. No-effect reconciliation discards uncommitted staging, preserves already-committed effects, and requires an inspected resume. |
-| Inspection and acceptance | CLI and observer MCP expose credential-scoped state. Result proposals survive native failure and remain separate from deterministic verification and human acceptance. |
+| Inspection and acceptance | Running `agentisan` opens a live, read-only terminal dashboard. CLI and observer MCP retain credential-scoped machine interfaces. Result proposals survive native failure and remain separate from deterministic verification and human acceptance. |
 
 The latest live acceptance used Claude Sonnet and Codex Luna at low effort in both lead directions.
 Each topology completed five native turns, two assignments, eleven persistent messages, all six
@@ -58,6 +58,42 @@ cargo build --locked
 The [live-team guide](docs/live-teams.md#create-and-run-a-team) is the canonical runbook for
 private configuration, account authentication, `--live` authorization, bounded submission,
 inspection, model selection, and recovery.
+
+## View the team
+
+Run Agentisan without a subcommand to open the terminal dashboard against `.agentisan`:
+
+```sh
+agentisan
+```
+
+Use another state directory or select an exact run at startup:
+
+```sh
+agentisan --data-dir /absolute/path/to/state
+agentisan --data-dir /absolute/path/to/state dashboard RUN_ID
+```
+
+The dashboard refreshes automatically and combines runs, agents, assignments, decisions, budgets,
+and the lead/worker/peer message timeline. Use Up/Down to change runs, click an agent or press Tab to
+filter its communication, `r` to refresh, and `q` to quit. It reads SQLite as the trusted local OS
+administrator and never takes ownership of a native agent session. It opens only the current
+schema in SQLite query-only mode: it never creates or migrates a registry. Start the normal service
+once to perform an explicit upgrade before viewing older state.
+
+For a released terminal run, select an agent and press `o`, or use:
+
+```sh
+agentisan --data-dir /absolute/path/to/state open RUN_ID AGENT_ID
+```
+
+Agentisan resumes the exact recorded Claude Code or Codex CLI session. It refuses while a run is
+queued, active, stalled, or interrupted, preventing a competing writer. Codex Desktop does not yet
+publish an external exact-thread opening contract. Claude CLI sessions can be transferred with
+`/desktop` when appropriate, but Claude Desktop maintains separate history. The `open` command
+reports these capability limits instead of guessing.
+
+All existing subcommands remain available for scripts, CI, MCP hosts, and detailed administration.
 
 ## Try inspection without model calls
 
@@ -179,8 +215,9 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-Ordinary tests cover registry invariants, messaging/limits, CLI/HTTP/MCP parity, initialization
-locking, persistence, and Unix process deadlines. They make no model calls. The separate
+Ordinary tests cover query-only dashboard access, scrolled mouse selection, exact historical-run
+lookup, native-open safety, registry invariants, messaging/limits, CLI/HTTP/MCP parity,
+initialization locking, persistence, and Unix process deadlines. They make no model calls. The separate
 [opt-in live test](docs/live-teams.md#repeat-the-live-acceptance-test) runs both provider
 topologies and verifies actual message routes and native session continuity. CI runs the
 ordinary checks on Linux, macOS, and Windows; Windows CLI execution is not supported yet.

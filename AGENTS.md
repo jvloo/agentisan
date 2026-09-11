@@ -18,7 +18,8 @@ cargo test --locked
 
 Ordinary integration tests use temporary databases and actual CLI/MCP subprocesses, with
 loopback networking and no model calls. Live account tests are explicitly opt-in and keep
-their records private. Keep stdout reserved for JSON/MCP output.
+their records private. Subcommands keep stdout reserved for JSON/MCP output; the default
+interactive dashboard uses the terminal's alternate screen and restores it on exit.
 
 ## Product constraints
 
@@ -26,6 +27,8 @@ their records private. Keep stdout reserved for JSON/MCP output.
   browser UI is optional, not an MVP dependency.
 - Give CLI and MCP access to the same registry and runtime behavior. Groups contain teams;
   agents have stable identities and explicit native bindings.
+- Keep the no-subcommand terminal dashboard read-only. Mouse and keyboard inspection must never
+  acquire a native writer; exact-session opening must reject Agentisan-owned runs.
 - Preserve one active coordination owner per objective. Peer messages do not grant authority.
 - Use exact verified identities. An MCP connection, directory, PID, or latest timestamp is
   insufficient to identify and authorize a native conversation.

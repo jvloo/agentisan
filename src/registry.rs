@@ -48,6 +48,31 @@ PRAGMA user_version=1;
 ";
 
 impl Registry {
+    /// Open an existing current-schema registry without creating, migrating, or writing it.
+    /// Intended for trusted local inspection surfaces such as the terminal dashboard.
+    pub async fn open_read_only(path: &Path) -> Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .read_only(true)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?;
+        if version != 7 {
+            pool.close().await;
+            return Err(RegistryError::Invalid(format!(
+                "read-only inspection requires schema version 7, found {version}; run an administrative command to migrate it"
+            )));
+        }
+        Ok(Self { pool })
+    }
+
     pub async fn open(path: &Path) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)
