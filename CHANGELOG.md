@@ -23,5 +23,7 @@
   native completion receipt.
 - Refreshed product claims and live-validation evidence for the final core-v2 implementation:
   62 ordinary tests and both Sonnet/Luna low-effort provider topologies.
+- Clarified the provider-agnostic coordination model separately from the currently shipped Claude
+  Code and Codex CLI adapters.
 - Clarified migration compatibility and current validation limits, including the terminal-only
   watcher assertion.
