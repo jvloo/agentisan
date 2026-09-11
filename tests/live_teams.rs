@@ -43,6 +43,11 @@ async fn both_provider_topologies_exchange_real_mcp_messages() {
         PathBuf::from(std::env::var("AGENTISAN_CLAUDE_BIN").expect("absolute Claude CLI path"));
     let codex =
         PathBuf::from(std::env::var("AGENTISAN_CODEX_BIN").expect("absolute Codex CLI path"));
+    let claude_model =
+        std::env::var("AGENTISAN_LIVE_CLAUDE_MODEL").unwrap_or_else(|_| "sonnet".into());
+    let codex_model =
+        std::env::var("AGENTISAN_LIVE_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".into());
+    let effort = std::env::var("AGENTISAN_LIVE_EFFORT").unwrap_or_else(|_| "low".into());
     let registry = Registry::open(&fixture::database_path(&data).unwrap())
         .await
         .unwrap();
@@ -120,11 +125,11 @@ async fn both_provider_topologies_exchange_real_mcp_messages() {
                     codex.clone()
                 },
                 model: if matches!(provider, Provider::Claude) {
-                    "sonnet".into()
+                    claude_model.clone()
                 } else {
-                    "gpt-6-astra".into()
+                    codex_model.clone()
                 },
-                effort: "low".into(),
+                effort: effort.clone(),
                 provider,
                 instructions,
             });

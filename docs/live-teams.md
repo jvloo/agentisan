@@ -98,7 +98,9 @@ them; repeated reads return the same snapshot. `message_send` stages an outgoing
 `turn_commit` atomically acknowledges claimed inputs and publishes staged messages. A successful
 `result_propose` also commits the lead's inputs and durable proposal atomically. The lead can
 create bounded assignments with reserved turn/message slices; assignees report them and the lead
-closes them. When assignments exist, completion requires all of them to be terminal. Legacy runs
+closes them. Agentisan derives the immutable scope hash from the objective and completion criteria
+and returns it in the creation receipt; the model does not choose that revision identifier. When
+assignments exist, completion requires all of them to be terminal. Legacy runs
 without assignments retain the earlier worker-report gate. Native turn completion is verified separately.
 The final run result still says `not_independently_verified`: it is an agent proposal, not proof
 of correctness or a human approval. A local administrator may run one exact-result verifier:
@@ -200,6 +202,9 @@ No failed import deletes an existing database.
 Ordinary tests use simulated adapters and real local transports. The live test is ignored
 unless explicitly selected and enabled. It makes real account model calls, preserves native
 sessions, and verifies all six lead/worker/peer routes plus stable, distinct native IDs.
+The default acceptance profile uses Claude Sonnet and Codex Luna at low effort. Override
+`AGENTISAN_LIVE_CLAUDE_MODEL`, `AGENTISAN_LIVE_CODEX_MODEL`, or `AGENTISAN_LIVE_EFFORT` for a
+controlled comparison without editing the test.
 
 ```sh
 AGENTISAN_LIVE_TESTS=1 \

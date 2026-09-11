@@ -118,7 +118,6 @@ fn assignment_args(run: &str) -> agentisan::assignments::CreateArgs {
         parent_id: None,
         objective: "Review supplied function".into(),
         done_criteria: vec!["Provide executable regression evidence".into()],
-        scope_hash: "a".repeat(64),
         deadline_seconds: 90,
         turn_budget: 2,
         message_budget: 3,
@@ -417,6 +416,89 @@ async fn exhausted_assignment_does_not_starve_peers_and_can_use_bounded_admin_re
 }
 
 #[tokio::test]
+async fn admin_extension_counts_assignments_staged_by_an_active_lead_turn() {
+    let (_temp, r, observers) = setup().await;
+    let run = teams::start(
+        &r,
+        "team",
+        "Keep staged reservations atomic",
+        7,
+        24,
+        120,
+        20,
+    )
+    .await
+    .unwrap();
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
+    let mut first = assignment_args(&run);
+    first.turn_budget = 1;
+    first.message_budget = 4;
+    let first = work_act(&r, &lead, Action::AssignmentCreate(first))
+        .await
+        .unwrap();
+    let first_id = first["assignment_id"].as_str().unwrap().to_owned();
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+
+    let worker = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &worker).await;
+    work_act(
+        &r,
+        &worker,
+        Action::AssignmentUpdate(agentisan::assignments::UpdateArgs {
+            run_id: run.clone(),
+            assignment_id: first_id.clone(),
+            state: "reported".into(),
+            idempotency_key: "first_report".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    commit(&r, &worker).await;
+    teams::finish(&r, &worker, Ok(native_success()))
+        .await
+        .unwrap();
+
+    let lead = teams::next(&r).await.unwrap().unwrap();
+    read_work(&r, &lead).await;
+    let mut second = assignment_args(&run);
+    second.assignee = "b".into();
+    second.objective = "Review the independent recovery path".into();
+    second.idempotency_key = "staged_second".into();
+    second.turn_budget = 1;
+    second.message_budget = 2;
+    let second = work_act(&r, &lead, Action::AssignmentCreate(second))
+        .await
+        .unwrap();
+    assert_ne!(first["scope_hash"], second["scope_hash"]);
+
+    assert!(
+        agentisan::assignments::extend_assignment(&r, &first_id, 3, 0, 0)
+            .await
+            .is_err(),
+        "the staged second assignment already owns one root turn reservation"
+    );
+    agentisan::assignments::extend_assignment(&r, &first_id, 2, 0, 0)
+        .await
+        .unwrap();
+    commit(&r, &lead).await;
+    teams::finish(&r, &lead, Ok(native_success()))
+        .await
+        .unwrap();
+    let work = teams::inspect_run(&r, &observers[0], &run).await.unwrap();
+    let remaining: i64 = work["work"]["assignments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["turn_budget"].as_i64().unwrap() - a["turns_used"].as_i64().unwrap())
+        .sum();
+    assert_eq!(remaining, 3);
+}
+
+#[tokio::test]
 async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
     let (_temp, r, _t) = setup().await;
     let run = teams::start(&r, "team", "Request a human decision", 10, 16, 120, 20)
@@ -428,9 +510,10 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
         .await
         .unwrap();
     let assignment_id = assignment["assignment_id"].as_str().unwrap().to_owned();
+    let scope_hash = assignment["scope_hash"].as_str().unwrap().to_owned();
     let mut other = assignment_args(&run);
     other.assignee = "b".into();
-    other.scope_hash = "c".repeat(64);
+    other.objective = "Review a distinct supplied module".into();
     other.idempotency_key = "assign_b".into();
     work_act(&r, &lead, Action::AssignmentCreate(other))
         .await
@@ -439,7 +522,7 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
         run_id: run.clone(),
         assignment_id: Some(assignment_id),
         question: "Approve exact supplied scope?".into(),
-        scope_hash: "a".repeat(64),
+        scope_hash: scope_hash.clone(),
         artifact_hash: "b".repeat(64),
         options: vec!["approve".into(), "reject".into()],
         blocking: true,
@@ -459,7 +542,7 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
         agentisan::assignments::resolve_decision(
             &r,
             id,
-            &"a".repeat(64),
+            &scope_hash,
             &"b".repeat(64),
             "approve",
             "human_admin"
@@ -507,7 +590,7 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
         agentisan::assignments::resolve_decision(
             &r,
             id,
-            &"a".repeat(64),
+            &scope_hash,
             &"b".repeat(64),
             "other",
             "human_admin"
@@ -518,7 +601,7 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
     let result = agentisan::assignments::resolve_decision(
         &r,
         id,
-        &"a".repeat(64),
+        &scope_hash,
         &"b".repeat(64),
         "approve",
         "human_admin",
@@ -530,7 +613,7 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
         agentisan::assignments::resolve_decision(
             &r,
             id,
-            &"a".repeat(64),
+            &scope_hash,
             &"b".repeat(64),
             "reject",
             "other_admin"
@@ -545,7 +628,7 @@ async fn decisions_require_commit_exact_human_scope_and_single_resolution() {
         agentisan::assignments::resolve_decision(
             &r,
             id,
-            &"a".repeat(64),
+            &scope_hash,
             &"b".repeat(64),
             "approve",
             "human_admin"

@@ -78,7 +78,8 @@ Each job gets its own permissions and an isolated writer workspace; a plain work
 
 ## Human decisions
 
-An agent can request a decision with an exact scope hash, artifact hash, offered choices, and an
+Agentisan derives each assignment's scope hash from its objective and completion criteria. An agent
+can request a decision with that exact scope hash, an artifact hash, offered choices, and an
 optional dependent assignment. The request is staged until the turn commits. A model cannot resolve
 it. The trusted local CLI records one resolution under the local OS administrator boundary, rejects
 mismatched revisions or choices, and can explicitly invalidate a request or resolution. A blocking

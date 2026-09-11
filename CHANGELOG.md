@@ -10,6 +10,8 @@
   inspectable and independently verifiable after failure or restart.
 - Added scheduler fail-closed health behavior and recovery of abandoned verifier reservations.
 - Added first-class assignments with reserved turn/message slices and explicit lifecycle updates.
+- Derive assignment scope hashes from canonical objective and completion criteria instead of
+  accepting model-selected revision identifiers.
 - Added starvation-free scheduling around exhausted assignments and inspected assignment extension
   that reallocates only capacity remaining inside the original run limits.
 - Added scoped human decision requests with trusted local resolution/invalidation; blocking decisions

@@ -500,7 +500,7 @@ impl AgentServer {
     }
 
     #[tool(
-        description = "Lead only: stage a bounded assignment to an exact teammate. Budgets reserve a slice of the remaining root limits; publish with turn_commit.",
+        description = "Lead only: stage a bounded assignment to an exact teammate. Agentisan derives its immutable scope hash and returns it. deadline_seconds must be 30..3600; budgets reserve a slice of the remaining root limits. Publish with turn_commit.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

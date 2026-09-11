@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 
 pub const SCHEMA: &str = "
@@ -37,8 +38,6 @@ pub struct CreateArgs {
     pub parent_id: Option<String>,
     pub objective: String,
     pub done_criteria: Vec<String>,
-    /// Immutable SHA-256 digest identifying the exact authorized work scope.
-    pub scope_hash: String,
     /// Relative deadline from creation time. The runtime caps it at the run deadline.
     pub deadline_seconds: u32,
     pub turn_budget: u32,
@@ -77,6 +76,11 @@ fn key_valid(s: &str) -> bool {
         && s.len() <= 64
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn assignment_scope_hash(objective: &str, done_criteria: &[String]) -> Result<String> {
+    let canonical = serde_json::to_vec(&(objective, done_criteria))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
 pub(crate) struct Actor<'a> {
@@ -244,7 +248,6 @@ pub(crate) async fn create(
             .done_criteria
             .iter()
             .any(|s| s.trim().is_empty() || s.len() > 512)
-        || !hash_valid(&args.scope_hash)
         || !(30..=3600).contains(&args.deadline_seconds)
         || args.turn_budget == 0
         || args.message_budget == 0
@@ -259,6 +262,7 @@ pub(crate) async fn create(
     if member != 1 {
         bail!("invalid assignee");
     }
+    let scope_hash = assignment_scope_hash(&args.objective, &args.done_criteria)?;
     let deadline = (now() + i64::from(args.deadline_seconds)).min(run.get("deadline"));
     // One current scope per agent makes charging each native turn/message unambiguous.
     let occupied:i64=sqlx::query_scalar("SELECT count(*) FROM assignments WHERE run_id=? AND assignee=? AND state NOT IN ('closed','expired','cancelled')").bind(actor.run).bind(&args.assignee).fetch_one(&mut **tx).await?;
@@ -266,7 +270,7 @@ pub(crate) async fn create(
         bail!("assignee already has an unfinished assignment");
     }
     if let Some(parent) = &args.parent_id {
-        let valid:i64=sqlx::query_scalar("SELECT count(*) FROM assignments WHERE id=? AND run_id=? AND (staged_turn IS NULL OR staged_turn=?) AND state NOT IN ('closed','expired','cancelled') AND scope_hash=? AND deadline>=? AND turn_budget>=? AND message_budget>=?").bind(parent).bind(actor.run).bind(actor.turn).bind(&args.scope_hash).bind(deadline).bind(i64::from(args.turn_budget)).bind(i64::from(args.message_budget)).fetch_one(&mut **tx).await?;
+        let valid:i64=sqlx::query_scalar("SELECT count(*) FROM assignments WHERE id=? AND run_id=? AND (staged_turn IS NULL OR staged_turn=?) AND state NOT IN ('closed','expired','cancelled') AND scope_hash=? AND deadline>=? AND turn_budget>=? AND message_budget>=?").bind(parent).bind(actor.run).bind(actor.turn).bind(&scope_hash).bind(deadline).bind(i64::from(args.turn_budget)).bind(i64::from(args.message_budget)).fetch_one(&mut **tx).await?;
         if valid != 1 {
             bail!("parent assignment not available in this run");
         }
@@ -285,9 +289,10 @@ pub(crate) async fn create(
         bail!("assignment exceeds remaining unreserved root budget");
     }
     let id = new_id("assignment");
-    sqlx::query("INSERT INTO assignments(id,run_id,creator,assignee,parent_id,state,objective,done_criteria,scope_hash,deadline,turn_budget,message_budget,created_at,staged_turn) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?)").bind(&id).bind(actor.run).bind(actor.agent).bind(&args.assignee).bind(&args.parent_id).bind(&args.objective).bind(serde_json::to_string(&args.done_criteria)?).bind(&args.scope_hash).bind(deadline).bind(i64::from(args.turn_budget)).bind(i64::from(args.message_budget)).bind(now()).bind(actor.turn).execute(&mut **tx).await?;
-    notify(tx,actor,&args.assignee,&id,json!({"kind":"assignment","assignment_id":id,"objective":args.objective,"done_criteria":args.done_criteria,"scope_hash":args.scope_hash,"deadline":deadline,"turn_budget":args.turn_budget,"message_budget":args.message_budget})).await?;
-    let receipt = json!({"status":"staged","assignment_id":id,"deadline":deadline});
+    sqlx::query("INSERT INTO assignments(id,run_id,creator,assignee,parent_id,state,objective,done_criteria,scope_hash,deadline,turn_budget,message_budget,created_at,staged_turn) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?)").bind(&id).bind(actor.run).bind(actor.agent).bind(&args.assignee).bind(&args.parent_id).bind(&args.objective).bind(serde_json::to_string(&args.done_criteria)?).bind(&scope_hash).bind(deadline).bind(i64::from(args.turn_budget)).bind(i64::from(args.message_budget)).bind(now()).bind(actor.turn).execute(&mut **tx).await?;
+    notify(tx,actor,&args.assignee,&id,json!({"kind":"assignment","assignment_id":id,"objective":args.objective,"done_criteria":args.done_criteria,"scope_hash":&scope_hash,"deadline":deadline,"turn_budget":args.turn_budget,"message_budget":args.message_budget})).await?;
+    let receipt =
+        json!({"status":"staged","assignment_id":id,"scope_hash":&scope_hash,"deadline":deadline});
     record(
         tx,
         actor,
@@ -614,7 +619,9 @@ pub async fn extend_assignment(
     {
         bail!("assignment run no longer accepts bounded recovery");
     }
-    let reserved=sqlx::query("SELECT COALESCE(sum(turn_budget-turns_used),0) AS turns,COALESCE(sum(message_budget-messages_used),0) AS messages FROM assignments WHERE run_id=? AND staged_turn IS NULL AND state NOT IN ('closed','expired','cancelled')").bind(&run_id).fetch_one(&mut *tx).await?;
+    // Staged assignments already reserve capacity. Counting only published rows
+    // would let an administrator oversubscribe the root before the lead commits.
+    let reserved=sqlx::query("SELECT COALESCE(sum(turn_budget-turns_used),0) AS turns,COALESCE(sum(message_budget-messages_used),0) AS messages FROM assignments WHERE run_id=? AND state NOT IN ('closed','expired','cancelled')").bind(&run_id).fetch_one(&mut *tx).await?;
     let sent: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE run_id=?")
         .bind(&run_id)
         .fetch_one(&mut *tx)
