@@ -18,6 +18,8 @@ pub enum Profile {
     Agent,
     /// A managed lead credential that can start and inspect its team.
     Controller,
+    /// An interactive host chat that coordinates configured workers directly.
+    Operator,
     /// A bounded, read-only inspection surface for trusted clients.
     Observer,
 }
@@ -139,7 +141,9 @@ fn action_rejected(error: &anyhow::Error) -> CallToolResult {
         "lease_not_active"
     } else if detail.contains("invalid commit idempotency") {
         "invalid_commit"
-    } else if detail.contains("recipient not in this team") {
+    } else if detail.contains("recipient not in this team")
+        || detail.contains("recipient not engaged")
+    {
         "recipient_not_available"
     } else if detail.contains("idempotency key reused") {
         "idempotency_conflict"
@@ -168,6 +172,27 @@ fn start_rejected(error: &anyhow::Error) -> CallToolResult {
     } else {
         "request_rejected"
     };
+    rejected_code(code)
+}
+
+fn interactive_rejected(error: &anyhow::Error) -> CallToolResult {
+    let detail = error.to_string();
+    let code = [
+        "scheduler_unavailable",
+        "controller_forbidden",
+        "invalid_control_handle",
+        "connector_fenced",
+        "stale_epoch",
+        "stale_version",
+        "idempotency_conflict",
+        "run_already_active",
+        "live_authorization_required",
+        "work_pending",
+        "run_already_settled",
+    ]
+    .into_iter()
+    .find(|code| detail.contains(code))
+    .unwrap_or("request_rejected");
     rejected_code(code)
 }
 
@@ -514,6 +539,175 @@ impl ServerHandler for ControllerServer {
     }
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStartArgs {
+    pub objective: String,
+    pub live: bool,
+    pub workers: Vec<String>,
+    pub initial_work: Vec<crate::interactive::InitialWorkItem>,
+    pub idempotency_key: String,
+    pub max_turns: Option<u32>,
+    pub max_messages: Option<u32>,
+    pub timeout_seconds: Option<u64>,
+    pub turn_timeout_seconds: Option<u64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorUpdateArgs {
+    pub run_id: String,
+    pub control_handle: String,
+    pub expected_version: i64,
+    pub expected_epoch: i64,
+    pub idempotency_key: String,
+    pub action: crate::interactive::UpdateAction,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorCancelArgs {
+    pub run_id: String,
+    pub control_handle: String,
+    pub expected_version: i64,
+    pub expected_epoch: i64,
+    pub idempotency_key: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct OperatorServer {
+    client: Client,
+    connector_instance: String,
+}
+
+impl OperatorServer {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client,
+            connector_instance: format!("connector_{}", uuid::Uuid::new_v4().simple()),
+        }
+    }
+}
+
+#[tool_router]
+impl OperatorServer {
+    #[tool(
+        description = "Start an interactive run that sends bounded work directly to exact configured workers. No managed model lead is launched. Requires live=true for actual provider calls.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn team_start(
+        &self,
+        Parameters(args): Parameters<OperatorStartArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = crate::interactive::StartArgs {
+            objective: args.objective,
+            live: args.live,
+            connector_instance: self.connector_instance.clone(),
+            workers: args.workers,
+            initial_work: args.initial_work,
+            idempotency_key: args.idempotency_key,
+            max_turns: args.max_turns,
+            max_messages: args.max_messages,
+            timeout_seconds: args.timeout_seconds,
+            turn_timeout_seconds: args.turn_timeout_seconds,
+        };
+        Ok(match self.client.start_interactive(request).await {
+            Ok(value) => success(value),
+            Err(error) => interactive_rejected(&error),
+        })
+    }
+
+    #[tool(
+        description = "Read interactive run state, worker turns, committed peer-message previews and latest controller reports. timeout_seconds=0 snapshots immediately; message_id fetches one exact committed body; a bounded wait never renews control or starts model work.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn team_status(
+        &self,
+        Parameters(args): Parameters<crate::interactive::StatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(match self.client.interactive_status(args).await {
+            Ok(value) => success(value),
+            Err(error) => interactive_rejected(&error),
+        })
+    }
+
+    #[tool(
+        description = "Update an interactive run within its existing envelope: message a worker, accept a committed worker report, or finish a settled run. Requires the per-run control handle and optimistic version/epoch.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn team_update(
+        &self,
+        Parameters(args): Parameters<OperatorUpdateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = crate::interactive::UpdateArgs {
+            run_id: args.run_id,
+            control_handle: args.control_handle,
+            connector_instance: self.connector_instance.clone(),
+            expected_version: args.expected_version,
+            expected_epoch: args.expected_epoch,
+            idempotency_key: args.idempotency_key,
+            action: args.action,
+        };
+        Ok(match self.client.interactive_update(request).await {
+            Ok(value) => success(value),
+            Err(error) => interactive_rejected(&error),
+        })
+    }
+
+    #[tool(
+        description = "Request cancellation of an interactive run. With no active native turn the stop is confirmed; otherwise the result remains explicitly unconfirmed for reconciliation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn team_cancel(
+        &self,
+        Parameters(args): Parameters<OperatorCancelArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = crate::interactive::CancelArgs {
+            run_id: args.run_id,
+            control_handle: args.control_handle,
+            connector_instance: self.connector_instance.clone(),
+            expected_version: args.expected_version,
+            expected_epoch: args.expected_epoch,
+            idempotency_key: args.idempotency_key,
+            reason: args.reason,
+        };
+        Ok(match self.client.interactive_cancel(request).await {
+            Ok(value) => success(value),
+            Err(error) => interactive_rejected(&error),
+        })
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for OperatorServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions("Agentisan interactive operator profile. This MCP host chat coordinates configured workers directly; Agentisan does not launch the configured model lead. Start only after the user asks to use an agent team and set live=true only within that authorization. Keep the returned control_handle private to this chat context. Use team_status with a bounded wait instead of polling. Accept committed reports before finishing. This profile cannot resolve trusted human decisions or expand the root budget.")
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentServer {
     client: Client,
@@ -574,11 +768,31 @@ impl AgentServer {
             capabilities.push("result_propose");
             capabilities.push("assignment_create");
         }
+        let run = if let Some(run_id) = identity["lease"]["run_id"].as_str() {
+            self.query(Query::RunsInspect {
+                run_id: run_id.to_string(),
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let coordination_mode = run
+            .as_ref()
+            .and_then(|value| value["mode"].as_str())
+            .unwrap_or("unknown");
+        let controller_mailbox = if coordination_mode == "interactive" {
+            run.as_ref().and_then(|value| value["lead_id"].as_str())
+        } else {
+            None
+        };
         Ok(success(serde_json::json!({
             "protocol": "agentisan-agent-v1",
             "identity": identity,
             "role": if self.can_propose {"lead"} else {"worker"},
             "capabilities": capabilities,
+            "coordination_mode": coordination_mode,
+            "controller_mailbox": controller_mailbox,
             "run_binding": "validated_by_service_on_each_action",
             "delivery": "read_claims_input_without_ack; turn_commit_acknowledges_and_publishes_atomically"
         })))
@@ -747,7 +961,7 @@ impl ServerHandler for AgentServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Agentisan agent profile. Identity and sender come from the per-turn lease credential; every action is restricted to its assigned active run and ownership epoch. Read the inbox once. Leads create bounded assignments; assignees report them and leads close them. A decision_request asks a human but never grants approval. Stage bounded peer messages and work updates, then call turn_commit before ending the native turn. Only the lead may call result_propose; a successful proposal commits that lead turn automatically. Proposal is separate from acceptance. This profile cannot inspect groups, enumerate teams, read the full timeline, alter permissions, resolve decisions, or execute commands.")
+            .with_instructions("Agentisan agent profile. Identity and sender come from the per-turn lease credential; every action is restricted to its assigned active run and ownership epoch. Read the inbox once and inspect coordination_mode. In interactive mode, no native model lead will run: exchange bounded peer messages as assigned and send the final report to controller_mailbox, then commit. In autonomous mode, leads create bounded assignments; assignees report them and leads close them. A decision_request asks a human but never grants approval. Stage messages and work updates, then call turn_commit before ending the native turn. Only a native lead may call result_propose; proposal is separate from acceptance. This profile cannot inspect groups, enumerate teams, read the full timeline, alter permissions, resolve decisions, or execute commands.")
     }
 }
 
@@ -795,6 +1009,28 @@ pub async fn run(client: Client, profile: Profile) -> anyhow::Result<()> {
                 .waiting()
                 .await?;
         }
+        Profile::Operator => {
+            let identity = client.inspect(Query::Whoami {}).await?;
+            if identity["evidence"] != "managed_credential" {
+                anyhow::bail!("operator MCP profile requires a managed lead credential");
+            }
+            let agent_id = identity["agent_id"].as_str().ok_or_else(|| {
+                anyhow::anyhow!("operator MCP profile requires a managed lead credential")
+            })?;
+            let record = client
+                .inspect(Query::AgentsInspect {
+                    agent_id: AgentId(agent_id.to_string()),
+                })
+                .await?;
+            if record["agent"]["role"] != "lead" {
+                anyhow::bail!("operator MCP profile requires a managed lead credential");
+            }
+            OperatorServer::new(client)
+                .serve(rmcp::transport::stdio())
+                .await?
+                .waiting()
+                .await?;
+        }
         Profile::Observer => {
             ObserverServer::new(client)
                 .serve(rmcp::transport::stdio())
@@ -829,5 +1065,20 @@ mod tests {
         assert_eq!(router.list_all().len(), 5);
         assert!(router.has_route("team_run_start"));
         assert!(!router.has_route("message_send"));
+    }
+
+    #[test]
+    fn operator_catalog_has_only_the_four_interactive_tools() {
+        let router = OperatorServer::tool_router();
+        let mut names: Vec<_> = router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["team_cancel", "team_start", "team_status", "team_update"]
+        );
     }
 }

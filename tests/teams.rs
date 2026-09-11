@@ -1803,7 +1803,7 @@ async fn version_six_database_migrates_to_stable_input_snapshots() {
     let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
         .await
         .unwrap();
-    sqlx::raw_sql("ALTER TABLE turn_leases DROP COLUMN input_snapshot; PRAGMA user_version=6;")
+    sqlx::raw_sql("DROP TABLE controller_mutations; DROP TABLE controller_start_requests; DROP TABLE controller_leases; DROP TABLE control_capabilities; DROP TABLE run_workers; DROP INDEX one_active_run; ALTER TABLE messages DROP COLUMN controller_ack_at; ALTER TABLE runs DROP COLUMN version; ALTER TABLE runs DROP COLUMN mode; CREATE UNIQUE INDEX one_active_run ON runs(team_id) WHERE state IN ('queued','running','completing'); ALTER TABLE turn_leases DROP COLUMN input_snapshot; PRAGMA user_version=6;")
         .execute(&pool)
         .await
         .unwrap();
@@ -1823,7 +1823,7 @@ async fn version_six_database_migrates_to_stable_input_snapshots() {
     .fetch_one(&check)
     .await
     .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     assert_eq!(snapshot_columns, 1);
     check.close().await;
     migrated.close().await;
@@ -1840,7 +1840,7 @@ async fn migration_preserves_v4_records_and_old_tokens_are_read_only() {
     let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display()))
         .await
         .unwrap();
-    sqlx::raw_sql("DROP TABLE work_operations; DROP TABLE decisions; DROP TABLE assignments; DROP TABLE turn_inputs; DROP TABLE turn_leases; DROP TABLE agent_epochs; DROP TABLE run_proposals; ALTER TABLE messages DROP COLUMN staged_turn; PRAGMA user_version=4;").execute(&pool).await.unwrap();
+    sqlx::raw_sql("DROP TABLE controller_mutations; DROP TABLE controller_start_requests; DROP TABLE controller_leases; DROP TABLE control_capabilities; DROP TABLE run_workers; DROP INDEX one_active_run; ALTER TABLE messages DROP COLUMN controller_ack_at; ALTER TABLE runs DROP COLUMN version; ALTER TABLE runs DROP COLUMN mode; CREATE UNIQUE INDEX one_active_run ON runs(team_id) WHERE state IN ('queued','running','completing'); DROP TABLE work_operations; DROP TABLE decisions; DROP TABLE assignments; DROP TABLE turn_inputs; DROP TABLE turn_leases; DROP TABLE agent_epochs; DROP TABLE run_proposals; ALTER TABLE messages DROP COLUMN staged_turn; PRAGMA user_version=4;").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO turns(id,run_id,agent_id,state,started_at) VALUES('legacy_turn',?,'lead','completed',?)").bind(&run).bind(teams::now()).execute(&pool).await.unwrap();
     sqlx::query(
         "UPDATE runs SET state='completed',result='Historical result bytes',turns=1 WHERE id=?",

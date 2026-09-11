@@ -7,8 +7,10 @@ coordination model is provider-agnostic: Agentisan owns canonical identity, assi
 turn commits, human decisions, recovery state, and result verification instead of delegating those
 contracts to a model provider.
 
-**Current adapters: Claude Code and Codex CLI.** Core-v2 runs a Claude lead with Codex workers or a
-Codex lead with Claude workers on macOS/Linux. One service-owned lead delegates to multiple workers,
+**Current adapters: Claude Code and Codex CLI.** Autonomous core-v2 runs a Claude lead with Codex
+workers or a Codex lead with Claude workers on macOS/Linux. Interactive v3 Phase 1 lets an MCP host
+chat dispatch configured workers directly without launching the configured model lead. In
+autonomous runs, one service-owned lead delegates to multiple workers,
 and workers exchange scoped messages directly. Existing CLIs retain their native sessions;
 Agentisan's CLI and observer MCP profile inspect authoritative runtime state; completed Codex
 sessions remain readable in Codex Desktop. The current worker profile supports consultation,
@@ -19,7 +21,7 @@ Start with the [live-team guide](docs/live-teams.md) and either the
 [Claude-led](examples/claude-led-team.json) or [Codex-led](examples/codex-led-team.json)
 configuration. The fixture walkthrough below exercises inspection without model calls.
 
-## Shipped in core-v2
+## Shipped in core-v2 and interactive v3 Phase 1
 
 | Capability | Current behavior |
 |---|---|
@@ -30,12 +32,17 @@ configuration. The fixture walkthrough below exercises inspection without model 
 | Human decisions | Agents can request a choice against exact scope and artifact hashes. Only the trusted local CLI can resolve or invalidate it; a blocking request pauses its dependent assignment. |
 | Recovery | Restarted in-flight work becomes explicit `unknown` state. No-effect reconciliation discards uncommitted staging, preserves already-committed effects, and requires an inspected resume. |
 | Inspection and acceptance | Running `agentisan` opens a live, read-only terminal dashboard. CLI and observer MCP retain credential-scoped machine interfaces. Result proposals survive native failure and remain separate from deterministic verification and human acceptance. |
-| Planning-chat control | A Codex Desktop or other MCP host can use a managed lead credential to start and inspect one service-owned team. The controller discloses that the host chat itself is not the managed lead session. |
+| Main-chat coordination | The `operator` MCP profile exposes four tools for a host chat to start configured workers directly, inspect peer communication, accept reports, finish, or cancel. The configured model lead receives no native turn. Phase 1 still uses a static roster, per-team credential, and separately started service. |
 
 The latest live acceptance used Claude Sonnet and Codex Luna at low effort in both lead directions.
 Each topology completed five native turns, two assignments, eleven persistent messages, all six
 required lead/worker/peer routes, and three distinct durable native sessions. See the
 [sanitized validation report](validation/live-teams.md).
+
+The interactive Phase 1 acceptance used one controller and two Claude Sonnet workers at low effort.
+It completed three native worker turns, both peer-message directions, two controller reports, two
+distinct native sessions, and zero native turns for the configured Codex lead. See the
+[interactive validation report](validation/interactive-teams-v3.md).
 
 ## Claims Agentisan does not make
 
@@ -202,6 +209,9 @@ sharing it across conversations shares access and does not identify those conver
 The controller profile exposes `controller_context_get`, `team_members_list`, `team_run_start`,
 `runs_inspect`, and `messages_list` for exactly one managed team. It cannot send messages as a team
 member, resolve decisions, change limits after launch, or execute commands.
+The v3 Phase 1 operator profile exposes `team_start`, `team_status`, `team_update`, and `team_cancel`.
+It uses a per-run control handle and optimistic version/epoch fencing. `team_status` is read-only and
+does not renew ownership. Trusted human decisions and budget expansion remain outside this profile.
 
 Agentisan's runtime state is authoritative while it owns a managed turn. A native Desktop client
 may render an externally driven CLI session as interrupted even while Agentisan records it as
@@ -259,7 +269,8 @@ cargo test --locked
 
 Ordinary tests cover query-only dashboard access, scrolled mouse selection, exact historical-run
 lookup, native-open safety, registry invariants, messaging/limits, CLI/HTTP/MCP parity, controller
-authorization and idempotency, initialization locking, persistence, and Unix process deadlines.
+authorization and idempotency, interactive control capabilities, direct worker dispatch,
+initialization locking, persistence, and Unix process deadlines.
 They make no model calls. The separate
 [opt-in live test](docs/live-teams.md#repeat-the-live-acceptance-test) runs both provider
 topologies and verifies actual message routes and native session continuity. CI runs the
@@ -272,8 +283,8 @@ the service through a proxy or tunnel. See the [Milestone 1 contract](docs/miles
 
 ## Design and roadmap
 
-- [Interactive agent teams v3](docs/interactive-teams-v3.md): proposed main-chat coordination,
-  generic MCP tools, installation experience, durability rules, and implementation plan.
+- [Interactive agent teams v3](docs/interactive-teams-v3.md): shipped static-roster Phase 1 plus the
+  proposed dynamic roster, installation experience, durability rules, and later implementation plan.
 - [Architecture](docs/architecture.md): the intended team runtime and its boundaries.
 - [Rust decision](docs/decisions/0001-rust-core.md): stack choice and deferred decisions.
 - [Durable protocol decision](docs/decisions/0002-durable-agent-protocol.md): leases, atomic

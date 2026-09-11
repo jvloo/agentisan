@@ -1,9 +1,9 @@
 # Architecture
 
-This document describes Agentisan's shipped core-v2 runtime design. The proposed
-[interactive agent teams v3](interactive-teams-v3.md) makes the developer's existing chat the
-default coordination owner and retains the service-owned model lead as an explicit autonomous mode.
-That proposal is not shipped yet.
+This document describes Agentisan's shipped core-v2 runtime and interactive v3 Phase 1. The
+[interactive agent teams v3](interactive-teams-v3.md) now lets an MCP host chat coordinate a
+configured static worker roster directly while retaining the service-owned model lead for autonomous
+runs. Dynamic rosters, one-time integration, and isolated coding workspaces remain proposed.
 
 The Rust implementation now includes
 the fixture registry, managed native CLI teams with persistent MCP messages, bounded invocations,
@@ -25,7 +25,7 @@ Agentisan does **not** aim to be a browser UI, a new Desktop app, or a recursive
 - **Groups** are organizational/policy namespaces. They do not spawn automatic coordinating agents.
 - **Teams** live inside groups; **agents** live inside teams.
 - Exactly **one main agent owns coordination** for a given objective/job at any time. Ownership transfer is explicit and stale owners are rejected — the system must never let two main agents drive the same objective concurrently.
-- The implemented CLI-team path is **service-led**: the service hosts the lead's native CLI turns and resumes members when messages arrive. A planning chat can start and inspect that team through the controller MCP profile, but the chat does not become the lead or inherit its sender identity. Coordination continues while the service host is available. A natively bound **client-led** adapter remains planned; in that mode, a disconnected client-owned main agent would need to return for coordination. The two modes must never create competing owners of the same objective.
+- Autonomous runs are **service-led**: the service hosts the lead's native CLI turns and resumes members when messages arrive. Interactive Phase 1 binds a host connector to a per-run control handle and dispatches directly to configured workers; the configured lead is a controller mailbox and receives no model turn. The MCP connection still does not prove a provider-native chat identity. The two modes cannot create competing owners of one objective.
 
 ## What the service owns
 
@@ -63,6 +63,10 @@ the service-owned native adapters claim delivery and report native state through
 administrators create teams, reconcile unknown turns as no-effect after inspection, select
 verifiers, and resolve or invalidate exact decision revisions. Public connector APIs, other effect
 reconciliation outcomes, and provider token/cost reservations remain design targets.
+The interactive **operator** profile exposes `team_start`, `team_status`, `team_update`, and
+`team_cancel`. Its per-run control handle, connector lease, epoch, optimistic version, and
+idempotency receipt fence mutations. Status is read-only. It cannot resolve trusted human decisions
+or enlarge the root budget.
 
 ## Budgets
 

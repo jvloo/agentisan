@@ -186,7 +186,7 @@ pub struct Work {
     pub team_id: String,
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
@@ -195,7 +195,7 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn reserved_agent_id(id: &str) -> bool {
-    matches!(id, "human" | "system" | "agentisan")
+    matches!(id, "human" | "system" | "agentisan" | "controller")
 }
 
 pub async fn create(registry: &Registry, data_dir: &Path, config: &TeamConfig) -> Result<Value> {
@@ -303,7 +303,7 @@ pub async fn start(
     Ok(id)
 }
 
-fn validate_start(
+pub(crate) fn validate_start(
     objective: &str,
     max_turns: u32,
     max_messages: u32,
@@ -471,7 +471,7 @@ pub async fn start_as_controller(
     }))
 }
 
-async fn caller(registry: &Registry, token: &str) -> Result<Principal, RegistryError> {
+pub(crate) async fn caller(registry: &Registry, token: &str) -> Result<Principal, RegistryError> {
     let payload: Option<String> =
         sqlx::query_scalar("SELECT payload FROM principals WHERE token_hash=?")
             .bind(credential_hash(token))
@@ -529,7 +529,7 @@ pub async fn inspect_run(
         _ => "not_independently_verified",
     };
     Ok(
-        json!({"id":id,"team_id":row.get::<String,_>("team_id"),"state":run_state,"result":row.get::<Option<String>,_>("result"),"proposal":proposal,"work":work,"error":row.get::<Option<String>,_>("error"),"turn_count":row.get::<i64,_>("turns"),"max_turns":row.get::<i64,_>("max_turns"),"deadline":row.get::<i64,_>("deadline"),"message_count":message_count,"pending_message_count":pending_message_count,"activity":activity,"turns":data,"acceptance":acceptance,"verification":verification}),
+        json!({"id":id,"team_id":row.get::<String,_>("team_id"),"lead_id":row.get::<String,_>("lead_id"),"mode":row.get::<String,_>("mode"),"state":run_state,"result":row.get::<Option<String>,_>("result"),"proposal":proposal,"work":work,"error":row.get::<Option<String>,_>("error"),"turn_count":row.get::<i64,_>("turns"),"max_turns":row.get::<i64,_>("max_turns"),"deadline":row.get::<i64,_>("deadline"),"message_count":message_count,"pending_message_count":pending_message_count,"activity":activity,"turns":data,"acceptance":acceptance,"verification":verification}),
     )
 }
 
@@ -619,6 +619,18 @@ pub async fn act(registry: &Registry, token: &str, action: Action) -> Result<Val
                     .await?;
             if recipient.is_none() {
                 bail!("recipient not in this team");
+            }
+            if row.get::<String, _>("mode") == "interactive" && to.as_str() != lead_id {
+                let engaged: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM run_workers WHERE run_id=? AND agent_id=?",
+                )
+                .bind(&run)
+                .bind(to.as_str())
+                .fetch_one(&mut *tx)
+                .await?;
+                if engaged != 1 {
+                    bail!("recipient not engaged in this interactive run");
+                }
             }
             if let Some(ref reply) = reply_to {
                 let related:i64=sqlx::query_scalar("SELECT count(*) FROM messages WHERE id=? AND run_id=? AND recipient=? AND sender=?").bind(reply).bind(&run).bind(agent.as_str()).bind(to.as_str()).fetch_one(&mut *tx).await?;
@@ -845,7 +857,7 @@ async fn record_binding_owned(
 pub async fn next(registry: &Registry) -> Result<Option<Work>> {
     let mut tx = registry.pool.begin_with("BEGIN IMMEDIATE").await?;
     let current = now();
-    sqlx::query("UPDATE runs SET state='exhausted',error='run deadline reached' WHERE state IN ('queued','running') AND deadline<=?").bind(current).execute(&mut *tx).await?;
+    sqlx::query("UPDATE runs SET state='exhausted',error='run deadline reached' WHERE state IN ('queued','running','waiting_for_controller','waiting_for_human') AND deadline<=?").bind(current).execute(&mut *tx).await?;
     let row = sqlx::query(
         "SELECT r.id,r.team_id,r.deadline,r.turn_timeout,r.turns,r.max_turns,m.recipient,tm.config,tm.credential_file,a.payload
          FROM runs r
@@ -854,6 +866,7 @@ pub async fn next(registry: &Registry) -> Result<Option<Work>> {
          JOIN agents a ON a.id=tm.agent_id
          WHERE r.state IN ('queued','running')
            AND m.delivered_turn IS NULL AND m.staged_turn IS NULL
+           AND (r.mode!='interactive' OR m.recipient!=r.lead_id)
            AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.state='running')
            AND NOT EXISTS(
              SELECT 1 FROM decisions d LEFT JOIN assignments da ON da.id=d.assignment_id
@@ -886,7 +899,7 @@ pub async fn next(registry: &Registry) -> Result<Option<Work>> {
         .bind(current)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE runs SET state='stalled',error='no pending messages and lead has not completed' WHERE state='running' AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.run_id=runs.id AND m.delivered_turn IS NULL AND m.staged_turn IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.run_id=runs.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1)").execute(&mut *tx).await?;
+        sqlx::query("UPDATE runs SET state=(CASE WHEN mode='interactive' THEN 'waiting_for_controller' ELSE 'stalled' END),error=(CASE WHEN mode='interactive' THEN 'no pending worker messages; waiting for the controller' ELSE 'no pending messages and lead has not completed' END) WHERE state='running' AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.run_id=runs.id AND m.delivered_turn IS NULL AND m.staged_turn IS NULL AND (runs.mode!='interactive' OR m.recipient!=runs.lead_id)) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.state='running') AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.run_id=runs.id AND d.staged_turn IS NULL AND d.state='requested' AND d.blocking=1)").execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(None);
     };
@@ -1014,6 +1027,12 @@ pub async fn finish(
         .bind(&work.turn_id)
         .fetch_one(&mut *tx)
         .await?;
+    let cancellation_was_requested: bool =
+        sqlx::query_scalar::<_, String>("SELECT state FROM runs WHERE id=?")
+            .bind(&work.run_id)
+            .fetch_one(&mut *tx)
+            .await?
+            == "cancel_requested";
     if lease_state == "active" {
         crate::assignments::discard(&mut tx, &work.turn_id).await?;
         sqlx::query("DELETE FROM messages WHERE staged_turn=?")
@@ -1049,6 +1068,12 @@ pub async fn finish(
                 .await?;
         }
     }
+    if cancellation_was_requested {
+        sqlx::query("UPDATE runs SET state='interrupted',error='native turn completed after cancellation was requested; inspect its committed effects before recovery' WHERE id=?")
+            .bind(&work.run_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("UPDATE turn_leases SET state='fenced' WHERE turn_id=? AND state='active'")
         .bind(&work.turn_id)
         .execute(&mut *tx)
@@ -1077,7 +1102,7 @@ pub async fn recover_interrupted(registry: &Registry) -> Result<()> {
     sqlx::query("UPDATE turn_leases SET state='fenced' WHERE state='active'")
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE runs SET state='interrupted',error='service restarted; inspect persisted messages and native sessions before retrying' WHERE state IN ('running','completing')").execute(&mut *tx).await?;
+    sqlx::query("UPDATE runs SET state='interrupted',error='service restarted; inspect persisted messages and native sessions before retrying' WHERE state IN ('running','completing','cancel_requested')").execute(&mut *tx).await?;
     sqlx::query("UPDATE turns SET state='unknown',error='service restarted before completion receipt' WHERE state='running'").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())

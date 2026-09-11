@@ -4,6 +4,7 @@ pub mod cli_protocol;
 pub mod client;
 pub mod dashboard;
 pub mod fixture;
+pub mod interactive;
 pub mod mcp;
 pub mod model;
 pub mod registry;

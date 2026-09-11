@@ -64,10 +64,10 @@ impl Registry {
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await?;
-        if version != 8 {
+        if version != 9 {
             pool.close().await;
             return Err(RegistryError::Invalid(format!(
-                "read-only inspection requires schema version 8, found {version}; run an administrative command to migrate it"
+                "read-only inspection requires schema version 9, found {version}; run an administrative command to migrate it"
             )));
         }
         Ok(Self { pool })
@@ -93,7 +93,7 @@ impl Registry {
             0 => {
                 sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
             }
-            1..=8 => {}
+            1..=9 => {}
             _ => {
                 return Err(RegistryError::Invalid(
                     "unsupported database schema version".into(),
@@ -130,6 +130,11 @@ impl Registry {
         }
         if version < 8 {
             sqlx::raw_sql(crate::teams::CONTROLLER_SCHEMA)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if version < 9 {
+            sqlx::raw_sql(crate::interactive::SCHEMA)
                 .execute(&mut *tx)
                 .await?;
         }

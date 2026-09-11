@@ -1,7 +1,10 @@
 # Interactive agent teams v3
 
-**Status: design proposal. None of the v3 behavior in this document is shipped yet.** The current
-implementation remains the core-v2 service-owned lead described in [Live CLI teams](live-teams.md).
+**Status: Phase 1 implemented for configured static rosters.** The `operator` MCP profile can start
+workers directly, observe their committed peer messages and controller reports, accept reports,
+finish a settled run, and cancel safely without launching the configured model lead. Dynamic rosters,
+one-time integration, isolated coding workspaces, trusted native human decisions, and additional
+providers remain proposals. Autonomous core-v2 remains described in [Live CLI teams](live-teams.md).
 
 ## Decision
 
@@ -143,10 +146,11 @@ per-run control handle, stores only its hash, and returns it only in the initiat
 mutation requires that handle and checks the run, controller epoch, connector instance, expected run
 version, and lease expiry.
 
-The handle is derived from a daemon master key, the unguessable run ID, and capability epoch. The
-master key remains in an owner-only keystore; SQLite stores the capability hash and epoch. This lets
-the daemon reproduce the same handle for an exact authorized start retry without storing plaintext.
-Rotation increments the capability epoch and invalidates the old handle.
+Phase 1 derives the handle from the existing private controller credential, the unguessable run ID,
+and capability epoch; SQLite stores only the capability hash and epoch. This lets an exact authorized
+start retry reproduce the handle without storing plaintext. The later generic integration should move
+derivation to a daemon root key held in an owner-only keystore. Rotation increments the capability
+epoch and invalidates the old handle.
 
 Each thin connector also generates an instance ID at startup and authenticates to the daemon with the
 local operator credential. A host may share that connector process among several chats, so the
@@ -249,7 +253,7 @@ controller connection identity and provider-native chat identity.
 |---|---|---|
 | `team_start` | Atomically create an interactive or autonomous run and return immediately. | write, idempotent, open-world |
 | `team_status` | Inspect immediately or wait after an opaque cursor for meaningful changes. | read-only |
-| `team_update` | Assign work, send a message, accept/reject work, or finish within the existing run envelope. | write, idempotent |
+| `team_update` | Send a follow-up, accept a committed report, or finish within the existing run envelope. | write, idempotent |
 | `team_cancel` | Request bounded cancellation and record confirmed versus uncertain stop. | destructive |
 
 The default prompt path usually needs only `team_start`, `team_status`, and `team_update`. A
@@ -259,6 +263,10 @@ decisions stay outside the generic model-facing catalog. Native opening belongs 
 or a host-specific UI adapter.
 
 ### `team_start`
+
+The JSON below is the target dynamic-roster schema. The shipped Phase 1 schema accepts exact static
+worker IDs plus `initial_work`, the bounded limits, `live`, and an idempotency key; provider/model
+resolution remains in the existing team configuration.
 
 ```json
 {
@@ -371,6 +379,10 @@ With `timeout_seconds: 0`, the tool returns an immediate snapshot. Every respons
 current `version`; mutations use that version as an optimistic concurrency check in addition to the
 controller lease.
 
+Phase 1 bounds timeline and inbox previews. Passing one discovered `message_id` returns that exact
+committed message body in `message_detail`, so large reports do not make every status response grow
+without limit.
+
 ### `team_update`
 
 `team_update` accepts exactly one action variant and an idempotency key:
@@ -390,14 +402,15 @@ controller lease.
 }
 ```
 
-Supported variants are:
+Phase 1 exposes three strict variants. Additional variants remain planned:
 
 | Type | Required content |
 |---|---|
-| `assign` | Assignee, objective, done criteria, dependencies, and budget slice. |
-| `message` | Exact recipient, bounded body, and optional correlation. |
-| `review` | Work item, `accept` or `reject`, evidence, and optional revision request. |
-| `finish` | Final synthesis, accepted work IDs, verification state, and limitations. |
+| `message` | **Shipped.** Exact engaged worker, bounded body, and optional correlation. |
+| `accept_report` | **Shipped.** Exact committed controller-inbox message. |
+| `finish` | **Shipped.** Final synthesis after every engaged worker has an accepted report. |
+| `assign` | **Planned.** New work item, dependencies, done criteria, and budget slice. |
+| `review` | **Planned.** Accept or reject a versioned work artifact with evidence. |
 
 The service rejects stale `expected_version`, invalid control handles, actions outside the controller
 lease, and mutations that would exceed the approved envelope. Expansion uses a trusted
@@ -591,6 +604,8 @@ Exit criterion: a fixture MCP server exposes the v3 catalog and passes schema sn
 calls.
 
 ### Phase 1 — Interactive coordination on the existing static roster
+
+**Status: implemented and live-tested with two Claude workers.**
 
 - Add actor mailboxes, controller leases, run mode, coordination epoch, and run events.
 - Implement `team_start`, `team_status`, `team_update`, and `team_cancel`.
