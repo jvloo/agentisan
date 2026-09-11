@@ -124,6 +124,26 @@ async fn record_error(registry: &Registry, id: &str, message: &str) -> Result<()
     Ok(())
 }
 
+/// A verifier has no durable completion receipt until `record_result` (or
+/// `record_error`) commits. Normal CLI verification holds `admin.lock` for the
+/// whole invocation, so after a crashed verifier releases that lock the next
+/// invocation can safely fence its abandoned reservation before starting work.
+///
+/// This deliberately is not called by the HTTP service: a service start cannot
+/// prove that a separately launched administrative verifier is no longer alive.
+async fn recover_abandoned_reservations(registry: &Registry) -> Result<()> {
+    sqlx::query(
+        "UPDATE verifications SET status='error',ended_at=?,summary=? WHERE status='running'",
+    )
+    .bind(teams::now())
+    .bind(
+        "verification process ended before a completion receipt; inspect artifacts before retrying",
+    )
+    .execute(&registry.pool)
+    .await?;
+    Ok(())
+}
+
 async fn record_result(registry: &Registry, id: &str, output: VerifierOutput) -> Result<Value> {
     if output.summary.trim().is_empty() || output.summary.len() > 4096 {
         bail!("verifier summary must contain 1 to 4096 bytes");
@@ -164,6 +184,10 @@ pub async fn verify(
     if !verifier.is_absolute() || !(1..=300).contains(&timeout_seconds) {
         bail!("verification requires an absolute executable and a 1 to 300 second deadline");
     }
+    // Serialize the public CLI path. This makes a released lock evidence that a
+    // previous CLI verifier cannot still own its reservation.
+    let _admin_lock = crate::fixture::admin_lock(data_dir)?;
+    recover_abandoned_reservations(registry).await?;
     let attempt = teams::new_id("verification");
     let artifacts = data_dir.join("runs").join(run_id).join(&attempt);
     private_dir(&artifacts)?;

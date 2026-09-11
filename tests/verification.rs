@@ -6,6 +6,7 @@ use agentisan::{
     registry::Registry,
     teams::{self, Action, MemberConfig, Provider, TeamConfig},
 };
+use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use std::{
     io::{BufRead, BufReader},
     os::unix::fs::PermissionsExt,
@@ -288,4 +289,65 @@ async fn verifier_deadline_records_error_without_acceptance() {
             .contains("deadline")
     );
     registry.close().await;
+}
+
+#[tokio::test]
+async fn later_cli_verification_fences_a_crashed_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let (run, token) = completed_proposal(&data, "candidate").await;
+    let database = data.join("registry.sqlite3");
+    let options = SqliteConnectOptions::new()
+        .filename(&database)
+        .foreign_keys(true);
+    let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+    sqlx::query("INSERT INTO verifications(id,run_id,status,verifier_path,verifier_sha256,result_sha256,started_at,artifacts) VALUES(?,?,'running',?,?,?,?,?)")
+        .bind("verification_crashed")
+        .bind(&run)
+        .bind("/missing/verifier")
+        .bind("0".repeat(64))
+        .bind("1".repeat(64))
+        .bind(1_i64)
+        .bind(data.join("runs/crashed").to_string_lossy().as_ref())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    let reject = temp.path().join("reject.sh");
+    verifier(
+        &reject,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"accepted\":false,\"summary\":\"rechecked\"}'\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_agentisan"))
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "runs",
+            "verify",
+            &run,
+            "--verifier",
+            reject.to_str().unwrap(),
+            "--timeout-seconds",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let registry = Registry::open(&database).await.unwrap();
+    let inspected = teams::inspect_run(&registry, &token, &run).await.unwrap();
+    assert_eq!(inspected["verification"]["state"], "rejected");
+    registry.close().await;
+    let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+    let old: String =
+        sqlx::query_scalar("SELECT status FROM verifications WHERE id='verification_crashed'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(old, "error");
+    connection.close().await.unwrap();
 }
